@@ -79,6 +79,16 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 ./hung_detect --pid 913
 ```
 
+## 🖼️ 截图
+
+### 表格输出
+
+![hung_detect table output](images/hung_detect.png)
+
+### JSON 输出
+
+![hung_detect json output](images/hung_detect_json.png)
+
 ## ⚙️ CLI 参数
 
 - `--all`, `-a`：显示所有匹配 GUI 进程（默认仅显示未响应进程）。

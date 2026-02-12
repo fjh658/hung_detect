@@ -79,6 +79,16 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 ./hung_detect --pid 913
 ```
 
+## 🖼️ Screenshots
+
+### Table Output
+
+![hung_detect table output](images/hung_detect.png)
+
+### JSON Output
+
+![hung_detect json output](images/hung_detect_json.png)
+
 ## ⚙️ CLI Options
 
 - `--all`, `-a`: show all matched GUI processes (default shows only not responding).
