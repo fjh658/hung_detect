@@ -1,0 +1,4 @@
+.build/
+hung_detect
+.claude/
+.DS_Store
