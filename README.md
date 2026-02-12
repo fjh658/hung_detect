@@ -45,6 +45,30 @@ Legacy wrapper (delegates to Makefile):
 ./build_hung_detect.sh 12.0
 ```
 
+## 🍺 Homebrew Tap Install
+
+Homebrew install uses the prebuilt binary package in `dist/` and does not compile on the end-user machine.
+
+Tap this repository locally:
+
+```bash
+brew tap fjh658/hung-detect /path/to/hung_detect
+brew install fjh658/hung-detect/hung-detect
+```
+
+Install from GitHub tap:
+
+```bash
+brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
+brew install fjh658/hung-detect/hung-detect
+```
+
+Refresh prebuilt package before release:
+
+```bash
+make package VERSION=0.1.0 MIN_MACOS=12.0
+```
+
 ## 🚀 Usage
 
 ```bash

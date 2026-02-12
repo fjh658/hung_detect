@@ -45,6 +45,30 @@ make check
 ./build_hung_detect.sh 12.0
 ```
 
+## 🍺 Homebrew Tap 安装
+
+Homebrew 安装会直接使用 `dist/` 中的预编译二进制包，不在用户机器上编译。
+
+本地把当前仓库作为 tap：
+
+```bash
+brew tap fjh658/hung-detect /path/to/hung_detect
+brew install fjh658/hung-detect/hung-detect
+```
+
+从 GitHub tap 安装：
+
+```bash
+brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
+brew install fjh658/hung-detect/hung-detect
+```
+
+发布前更新预编译包：
+
+```bash
+make package VERSION=0.1.0 MIN_MACOS=12.0
+```
+
 ## 🚀 使用示例
 
 ```bash

@@ -1,0 +1,21 @@
+class HungDetect < Formula
+  desc "Detect Not Responding macOS GUI apps via Activity Monitor private signal"
+  homepage "https://github.com/fjh658/hung_detect"
+  license "Apache-2.0"
+  version "0.1.0"
+
+  tap_root = Pathname.new(__dir__).parent
+  artifact = tap_root/"dist"/"hung-detect-0.1.0-macos-universal.tar.gz"
+  url "file://#{artifact}"
+  sha256 "c659551462f34a5eddea288c8f93fc556f2932d70fb3be03c379cafc19bb1212"
+
+  depends_on :macos
+
+  def install
+    bin.install "hung_detect"
+  end
+
+  test do
+    assert_match "hung_detect", shell_output("#{bin}/hung_detect --help")
+  end
+end
