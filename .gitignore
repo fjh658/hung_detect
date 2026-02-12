@@ -2,3 +2,7 @@
 hung_detect
 .claude/
 .DS_Store
+*.log
+*.tmp
+*.swp
+*.swo
