@@ -124,6 +124,10 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 - SHA-256 改为延迟计算，只对最终输出的行计算。
 - `--json --all` 会比默认模式慢，因为需要输出并哈希所有匹配进程。
 
+## 🩺 hung_diagnosis
+
+配套诊断脚本，自动对 `hung_detect` 检测到的未响应进程采集 `sample` 和 `spindump` 数据。详见 [HUNG_DIAGNOSIS.zh-CN.md](./HUNG_DIAGNOSIS.zh-CN.md)。
+
 ## 📄 许可证
 
 Apache License 2.0，见 `LICENSE`。

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 
 MIN_MACOS ?= 12.0
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 BIN := hung_detect
 SRC := hung_detect.swift
 SWIFTC ?= swiftc
@@ -24,8 +24,8 @@ package: $(DIST_TARBALL)
 $(DIST_DIR):
 	mkdir -p "$(DIST_DIR)"
 
-$(DIST_TARBALL): $(BIN) | $(DIST_DIR)
-	tar -czf "$@" "$(BIN)"
+$(DIST_TARBALL): $(BIN) hung_diagnosis | $(DIST_DIR)
+	tar -czf "$@" "$(BIN)" hung_diagnosis
 	@echo "Packaged: $(abspath $(DIST_TARBALL))"
 	@shasum -a 256 "$(DIST_TARBALL)"
 

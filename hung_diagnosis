@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""
+hung_diagnosis - detect Not Responding processes and collect diagnostic data
+
+Three levels of diagnosis (all tasks run in parallel):
+  Default:      per-process sample (CPU profiling)
+  --spindump:   + per-process spindump (blocking analysis, hung duration)
+  --full:       + system-wide spindump (cross-process dependencies)
+
+Usage:
+    ./hung_diagnosis                       # sample only
+    sudo ./hung_diagnosis --spindump       # + per-process spindump
+    sudo ./hung_diagnosis --full           # + system-wide spindump
+    ./hung_diagnosis --loop 10             # scan every 10 seconds
+    ./hung_diagnosis --duration 5          # sample for 5 seconds (default 3)
+    ./hung_diagnosis --outdir /tmp/diag    # custom output directory
+
+Requires: hung_detect (same directory), sample & spindump (macOS built-in)
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+HUNG_DETECT = SCRIPT_DIR / "hung_detect"
+
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+RED = "\033[31m" if USE_COLOR else ""
+YELLOW = "\033[33m" if USE_COLOR else ""
+RESET = "\033[0m" if USE_COLOR else ""
+
+
+def _ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log(msg):
+    print(f"[{_ts()}] {msg}", flush=True)
+
+
+def log_error(msg):
+    print(f"[{_ts()}] {RED}{msg}{RESET}", flush=True)
+
+
+def log_warn(msg):
+    print(f"[{_ts()}] {YELLOW}{msg}{RESET}", flush=True)
+
+
+def detect_hung():
+    """Run hung_detect --json, return list of not-responding processes."""
+    try:
+        r = subprocess.run(
+            [str(HUNG_DETECT), "--json"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        log_error(f"error: {HUNG_DETECT} not found, run 'make build' first")
+        sys.exit(2)
+    except subprocess.TimeoutExpired:
+        log_error("error: hung_detect timed out")
+        return []
+
+    if r.returncode == 2:
+        log_error(f"error: hung_detect failed: {r.stderr.strip()}")
+        return []
+
+    try:
+        data = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        log_error("error: failed to parse hung_detect output")
+        return []
+
+    return [p for p in data.get("processes", []) if not p.get("responding", True)]
+
+
+def _safe_name(name):
+    return name.replace(" ", "_").replace("/", "_")
+
+
+def _spindump_cmd(args, outfile):
+    """Build spindump command, prepend sudo -n if not root."""
+    cmd = ["spindump"] + [str(a) for a in args] + ["-file", str(outfile)]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n"] + cmd
+    return cmd
+
+
+def run_sample(pid, name, duration, outdir, ts):
+    """Run sample on a single process."""
+    outfile = outdir / f"{ts}_{_safe_name(name)}_{pid}.sample.txt"
+    try:
+        subprocess.run(
+            ["sample", str(pid), str(duration), "1", "-file", str(outfile)],
+            capture_output=True, timeout=duration + 30,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        log_error(f"  sample PID={pid} exception: {e}")
+        return (pid, name, "sample", None)
+
+    if outfile.exists() and outfile.stat().st_size > 0:
+        return (pid, name, "sample", outfile)
+    return (pid, name, "sample", None)
+
+
+def run_spindump_pid(pid, name, duration, outdir, ts):
+    """Run spindump targeting a single process."""
+    outfile = outdir / f"{ts}_{_safe_name(name)}_{pid}.spindump.txt"
+    cmd = _spindump_cmd([pid, duration], outfile)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 60)
+        if r.returncode != 0:
+            stderr = r.stderr.strip()
+            if os.geteuid() != 0 and ("sudo" in stderr or "password" in stderr):
+                log_warn(f"  spindump PID={pid} requires root: run with sudo")
+            elif stderr:
+                log_error(f"  spindump PID={pid} failed: {stderr}")
+            return (pid, name, "spindump", None)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        log_error(f"  spindump PID={pid} exception: {e}")
+        return (pid, name, "spindump", None)
+
+    if outfile.exists() and outfile.stat().st_size > 0:
+        return (pid, name, "spindump", outfile)
+    return (pid, name, "spindump", None)
+
+
+def run_spindump_system(duration, outdir, ts):
+    """Run system-wide spindump."""
+    outfile = outdir / f"{ts}_system.spindump.txt"
+    cmd = _spindump_cmd([duration], outfile)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=duration + 60)
+        if r.returncode != 0:
+            stderr = r.stderr.strip()
+            if os.geteuid() != 0 and ("sudo" in stderr or "password" in stderr):
+                log_warn("  spindump system-wide requires root: run with sudo")
+            elif stderr:
+                log_error(f"  spindump system-wide failed: {stderr}")
+            return None
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        log_error(f"  spindump system-wide exception: {e}")
+        return None
+
+    if outfile.exists() and outfile.stat().st_size > 0:
+        return outfile
+    return None
+
+
+def scan_and_diagnose(duration, outdir, max_parallel, level):
+    """Single scan + parallel diagnosis. level: 1=sample, 2=+spindump/pid, 3=+spindump/system."""
+    hung = detect_hung()
+
+    if not hung:
+        log("all processes responding, nothing to do")
+        return False
+
+    log(f"found {len(hung)} not-responding process(es):")
+    for p in hung:
+        log(f"  PID={p['pid']}  {p['name']}")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    tools = "sample"
+    if level >= 2:
+        tools += " + spindump per-process"
+    if level >= 3:
+        tools += " + system-wide spindump"
+    log(f"starting diagnosis ({tools}, {duration}s)...")
+
+    t_start = time.monotonic()
+    n_per_proc = 1 if level == 1 else 2
+    n_system = 1 if level >= 3 else 0
+    workers = len(hung) * n_per_proc + n_system
+
+    with ThreadPoolExecutor(max_workers=min(workers, max_parallel)) as pool:
+        futures = []
+
+        # per-process sample (always)
+        for p in hung:
+            futures.append(pool.submit(
+                run_sample, p["pid"], p["name"], duration, outdir, ts))
+
+        # per-process spindump (level >= 2)
+        if level >= 2:
+            for p in hung:
+                futures.append(pool.submit(
+                    run_spindump_pid, p["pid"], p["name"], duration, outdir, ts))
+
+        # system-wide spindump (level >= 3)
+        sw_future = None
+        if level >= 3:
+            sw_future = pool.submit(run_spindump_system, duration, outdir, ts)
+
+        # collect per-process results, group by pid
+        results = {}  # pid -> {name, sample: ..., spindump: ...}
+        for f in as_completed(futures):
+            if f is sw_future:
+                continue
+            pid, name, tool, path = f.result()
+            if pid not in results:
+                results[pid] = {"name": name}
+            results[pid][tool] = (path, time.monotonic() - t_start)
+
+        # print grouped with tree
+        for pid in results:
+            r = results[pid]
+            name = r["name"]
+            tools_collected = [t for t in ("sample", "spindump") if t in r]
+            log(f"  {name} (PID {pid}):")
+            for i, tool in enumerate(tools_collected):
+                path, elapsed = r[tool]
+                branch = "\u2514\u2500" if i == len(tools_collected) - 1 else "\u251c\u2500"
+                if path:
+                    size = path.stat().st_size
+                    log(f"    {branch} {tool:<10s}{path.name} ({size} bytes, {elapsed:.1f}s)")
+                else:
+                    log_warn(f"    {branch} {tool:<10s}FAIL ({elapsed:.1f}s)")
+
+        # collect system-wide result
+        if sw_future:
+            sw_path = sw_future.result()
+            elapsed = time.monotonic() - t_start
+            if sw_path:
+                size = sw_path.stat().st_size
+                log(f"  system-wide spindump: {sw_path.name} ({size} bytes, {elapsed:.1f}s)")
+            else:
+                log_warn(f"  system-wide spindump: FAIL ({elapsed:.1f}s)")
+
+    fix_ownership(outdir)
+
+    total = time.monotonic() - t_start
+    log(f"diagnosis complete in {total:.1f}s, output: {outdir}")
+    return True
+
+
+def fix_ownership(outdir):
+    """Restore file ownership to the real user when running under sudo."""
+    uid = os.environ.get("SUDO_UID")
+    gid = os.environ.get("SUDO_GID")
+    if uid is None:
+        return
+    uid, gid = int(uid), int(gid)
+    os.chown(outdir, uid, gid)
+    for f in outdir.iterdir():
+        os.chown(f, uid, gid)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Detect not-responding processes and collect diagnostic data")
+    parser.add_argument("--duration", type=int, default=3,
+                        help="sampling duration in seconds (default: 3)")
+    parser.add_argument("--outdir", type=str, default="",
+                        help="output directory (default: ./hung_diagnosis_output)")
+    parser.add_argument("--loop", type=int, default=0, metavar="SEC",
+                        help="loop scan interval in seconds (default: single scan)")
+    parser.add_argument("--max", type=int, default=8,
+                        help="max parallel tasks (default: 8)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--spindump", action="store_true",
+                       help="add per-process spindump (requires sudo)")
+    group.add_argument("--full", action="store_true",
+                       help="add per-process + system-wide spindump (requires sudo)")
+    args = parser.parse_args()
+
+    if not HUNG_DETECT.exists():
+        log_error(f"error: {HUNG_DETECT} not found, run 'make build' first")
+        sys.exit(2)
+
+    level = 1
+    if args.spindump:
+        level = 2
+    elif args.full:
+        level = 3
+
+    outdir = Path(args.outdir) if args.outdir else Path.cwd() / "hung_diagnosis_output"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    tools = "sample"
+    if level >= 2:
+        tools += " + spindump"
+    if level >= 3:
+        tools += " + system-wide"
+    log("hung_diagnosis - not-responding process diagnostic tool")
+    log(f"duration: {args.duration}s | tools: {tools} | output: {outdir}")
+    print()
+
+    if args.loop > 0:
+        log(f"loop mode: scanning every {args.loop}s (Ctrl+C to stop)")
+        print()
+        try:
+            while True:
+                scan_and_diagnose(args.duration, outdir, args.max, level)
+                print()
+                time.sleep(args.loop)
+        except KeyboardInterrupt:
+            print()
+            log("stopped")
+    else:
+        found = scan_and_diagnose(args.duration, outdir, args.max, level)
+        sys.exit(1 if found else 0)
+
+
+if __name__ == "__main__":
+    main()

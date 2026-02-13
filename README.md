@@ -124,6 +124,10 @@ If all required symbols cannot be resolved, the program exits with code `2`.
 - SHA-256 is computed lazily for rows that are actually emitted.
 - `--json --all` can be noticeably slower than default mode because it emits and hashes every matched process.
 
+## 🩺 hung_diagnosis
+
+A companion diagnostic script that automatically collects `sample` and `spindump` data for not-responding processes detected by `hung_detect`. See [HUNG_DIAGNOSIS.md](./HUNG_DIAGNOSIS.md) for details.
+
 ## 📄 License
 
 Apache License 2.0. See `LICENSE`.
