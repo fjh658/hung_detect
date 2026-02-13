@@ -1,6 +1,6 @@
 .build/
 hung_detect
-hung_diagnosis_output/
+hung_diag_*/
 .claude/
 .DS_Store
 *.log

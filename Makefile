@@ -24,8 +24,8 @@ package: $(DIST_TARBALL)
 $(DIST_DIR):
 	mkdir -p "$(DIST_DIR)"
 
-$(DIST_TARBALL): $(BIN) hung_diagnosis | $(DIST_DIR)
-	tar -czf "$@" "$(BIN)" hung_diagnosis
+$(DIST_TARBALL): $(BIN) | $(DIST_DIR)
+	tar -czf "$@" "$(BIN)"
 	@echo "Packaged: $(abspath $(DIST_TARBALL))"
 	@shasum -a 256 "$(DIST_TARBALL)"
 

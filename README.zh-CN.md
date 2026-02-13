@@ -13,6 +13,8 @@
 - 支持终端表格输出和 JSON 输出。
 - 输出进程元信息：PID、父 PID、用户、Bundle ID、架构、沙盒状态、防睡眠状态、运行时长、可执行文件路径。
 - 可选显示 SHA-256。
+- **监控模式**：持续 push+poll 监听 hung 状态变化（NDJSON 事件流）。
+- **内置诊断**：自动对 hung 进程执行 `sample` 和 `spindump`。
 
 ## 🧰 环境要求
 
@@ -72,11 +74,21 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 ## 🚀 使用示例
 
 ```bash
-./hung_detect
-./hung_detect --all
-./hung_detect --json
-./hung_detect --name Chrome
-./hung_detect --pid 913
+./hung_detect                             # 检测 hung 应用（有则 exit 1）
+./hung_detect --all                       # 列出所有 GUI 应用详情
+./hung_detect --json                      # 机器可读 JSON 输出
+./hung_detect --name Chrome               # 显示 Chrome 进程
+./hung_detect --pid 913                   # 显示指定 PID
+
+# 监控模式
+./hung_detect --monitor                   # 监听 hung 状态变化
+./hung_detect -m --json | jq .            # 以 NDJSON 流输出事件
+./hung_detect -m --name Safari --interval 2  # 每 2 秒监控 Safari
+
+# 诊断
+./hung_detect --sample                    # 检测 + 对 hung 进程采样
+sudo ./hung_detect --full --duration 5    # 完整诊断，5 秒采集
+./hung_detect -m --sample                 # 监控 + 自动诊断
 ```
 
 ## 🖼️ 截图
@@ -91,6 +103,7 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 
 ## ⚙️ CLI 参数
 
+**检测：**
 - `--all`, `-a`：显示所有匹配 GUI 进程（默认仅显示未响应进程）。
 - `--sha`：在表格输出中显示 SHA-256 列。
 - `--pid <PID>`：按 PID 过滤（可重复）。
@@ -98,6 +111,17 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 - `--json`：输出 JSON（始终包含 `sha256` 字段）。
 - `--no-color`：关闭 ANSI 颜色。
 - `-h`, `--help`：显示帮助。
+
+**监控：**
+- `--monitor`, `-m`：持续监控模式（Ctrl+C 停止）。
+- `--interval <SECS>`：监控轮询间隔（默认：3，最小：0.5）。
+
+**诊断：**
+- `--sample`：对每个 hung 进程执行 `sample`。
+- `--spindump`：同时执行每进程 spindump（隐含 `--sample`，需要 root）。
+- `--full`：同时执行全量 spindump（隐含 `--spindump`，需要 root）。
+- `--duration <SECS>`：sample/spindump 采集时长（默认：3，最小：1）。
+- `--outdir <DIR>`：输出目录（默认：`./hung_diag_<timestamp>`）。
 
 ## 📌 退出码
 
@@ -124,9 +148,38 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 - SHA-256 改为延迟计算，只对最终输出的行计算。
 - `--json --all` 会比默认模式慢，因为需要输出并哈希所有匹配进程。
 
-## 🩺 hung_diagnosis
+## 🩺 诊断
 
-配套诊断脚本，自动对 `hung_detect` 检测到的未响应进程采集 `sample` 和 `spindump` 数据。详见 [HUNG_DIAGNOSIS.zh-CN.md](./HUNG_DIAGNOSIS.zh-CN.md)。
+诊断功能已内置于 `hung_detect`。发现 hung 进程后可自动并行采集 `sample` 和 `spindump` 数据。
+
+### 三级诊断
+
+| 级别 | 参数 | 工具 | 需要 root |
+|---|---|---|---|
+| 1 | `--sample` | 每进程 `sample` | 否 |
+| 2 | `--spindump` | + 每进程 `spindump` | 是 |
+| 3 | `--full` | + 全量 `spindump` | 是 |
+
+### 输出文件
+
+保存到 `hung_diag_<timestamp>/`（或 `--outdir`），以时间戳为文件名前缀：
+
+```
+hung_diag_20260214_142312/
+├── 20260214_142312_AlDente_913.sample.txt
+├── 20260214_142312_AlDente_913.spindump.txt
+└── 20260214_142312_system.spindump.txt
+```
+
+### 监控 + 诊断
+
+诊断与监控模式联动 — 进程变为 hung 时自动触发诊断：
+
+```bash
+./hung_detect -m --sample                 # 自动 sample hung 进程
+sudo ./hung_detect -m --full              # 完整自动诊断
+./hung_detect -m --sample --json | jq .   # 以 NDJSON 流输出诊断事件
+```
 
 ## 📄 许可证
 
