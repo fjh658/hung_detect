@@ -1,9 +1,9 @@
 #!/usr/bin/swift
-// hung_detect.swift — macOS Hung App Detector
+// main.swift — macOS Hung App Detector
 // Uses the same private API as Activity Monitor (CGSEventIsAppUnresponsive)
 //
 // Build (universal, macOS 12+): ./build_hung_detect.sh
-// Run:                         ./hung_detect  or  swift hung_detect.swift
+// Run:                         ./hung_detect  or  swift run hung_detect
 
 import AppKit
 import Darwin
@@ -259,12 +259,18 @@ struct Options {
     var pids: [pid_t] = []
     var names: [String] = []
     var help = false
+    var version = false
     var monitor = false
     var interval: Double = 3.0
     var sample = false        // --sample
     var spindump = false      // --spindump (implies --sample)
     var full = false          // --full (implies --spindump)
-    var diagDuration: Int = 3 // --duration <SEC>, min 1
+    var sampleDuration: Int = 10          // --sample-duration <SECS>, min 1
+    var sampleIntervalMs: Int = 1         // --sample-interval-ms <MS>, min 1
+    var spindumpDuration: Int = 10        // --spindump-duration <SECS>, min 1
+    var spindumpIntervalMs: Int = 10      // --spindump-interval-ms <MS>, min 1
+    var spindumpSystemDuration: Int = 10  // --spindump-system-duration <SECS>, min 1
+    var spindumpSystemIntervalMs: Int = 10 // --spindump-system-interval-ms <MS>, min 1
     var outdir: String? = nil // --outdir <DIR>
 
     var diagnosisEnabled: Bool { sample || spindump || full }
@@ -309,12 +315,51 @@ func parseArgs() -> Options {
             guard i < args.count, let d = Int(args[i]), d >= 1 else {
                 fputs("--duration needs an integer >= 1\n", stderr); exit(2)
             }
-            o.diagDuration = d
+            o.sampleDuration = d
+            o.spindumpDuration = d
+            o.spindumpSystemDuration = d
+        case "--sample-duration":
+            i += 1
+            guard i < args.count, let d = Int(args[i]), d >= 1 else {
+                fputs("--sample-duration needs an integer >= 1\n", stderr); exit(2)
+            }
+            o.sampleDuration = d
+        case "--sample-interval-ms":
+            i += 1
+            guard i < args.count, let ms = Int(args[i]), ms >= 1 else {
+                fputs("--sample-interval-ms needs an integer >= 1\n", stderr); exit(2)
+            }
+            o.sampleIntervalMs = ms
+        case "--spindump-duration":
+            i += 1
+            guard i < args.count, let d = Int(args[i]), d >= 1 else {
+                fputs("--spindump-duration needs an integer >= 1\n", stderr); exit(2)
+            }
+            o.spindumpDuration = d
+        case "--spindump-interval-ms":
+            i += 1
+            guard i < args.count, let ms = Int(args[i]), ms >= 1 else {
+                fputs("--spindump-interval-ms needs an integer >= 1\n", stderr); exit(2)
+            }
+            o.spindumpIntervalMs = ms
+        case "--spindump-system-duration":
+            i += 1
+            guard i < args.count, let d = Int(args[i]), d >= 1 else {
+                fputs("--spindump-system-duration needs an integer >= 1\n", stderr); exit(2)
+            }
+            o.spindumpSystemDuration = d
+        case "--spindump-system-interval-ms":
+            i += 1
+            guard i < args.count, let ms = Int(args[i]), ms >= 1 else {
+                fputs("--spindump-system-interval-ms needs an integer >= 1\n", stderr); exit(2)
+            }
+            o.spindumpSystemIntervalMs = ms
         case "--outdir":
             i += 1
             guard i < args.count else { fputs("--outdir needs a path\n", stderr); exit(2) }
             o.outdir = args[i]
         case "-h", "--help":  o.help = true
+        case "-v", "--version": o.version = true
         default: fputs("Unknown option: \(args[i])\n", stderr); exit(2)
         }
         i += 1
@@ -322,7 +367,69 @@ func parseArgs() -> Options {
     return o
 }
 
+private func renderHelpRows(_ rows: [(String, String)], indent: String = "  ", align: Bool = true) -> String {
+    if !align {
+        return rows.map { left, right in "\(indent)\(left)  \(right)" }.joined(separator: "\n")
+    }
+    let leftWidth = rows.reduce(0) { max($0, $1.0.count) }
+    return rows.map { left, right in
+        let gap = String(repeating: " ", count: max(2, leftWidth - left.count + 2))
+        return "\(indent)\(left)\(gap)\(right)"
+    }.joined(separator: "\n")
+}
+
 func printHelp() {
+    let optionRows: [(String, String)] = [
+        ("--all, -a", "Show all processes (default: only Not Responding)"),
+        ("--sha", "Show SHA-256 column"),
+        ("--pid <PID>", "Check specific PID (repeatable, shows all statuses)"),
+        ("--name <NAME>", "Match name/bundle id (repeatable, shows all statuses)"),
+        ("--monitor, -m", "Continuous monitoring mode (Ctrl+C to stop)"),
+        ("--interval <SECS>", "Polling interval for monitor mode (default: 3, min: 0.5)"),
+        ("--json", "JSON output (NDJSON in monitor mode)"),
+        ("--no-color", "Disable ANSI colors"),
+        ("-v, --version", "Show version"),
+        ("-h, --help", "Show help"),
+    ]
+    let diagnosisIntroRows: [(String, String)] = [
+        ("--sample", "Run `sample` on each hung process"),
+        ("--spindump", "Also run per-process spindump (implies --sample, needs root)"),
+        ("--full", "Also run system-wide spindump (implies --spindump, needs root)"),
+        ("scope:", "diagnosis options apply in both single-shot and monitor (-m) modes"),
+        ("note:", "--spindump/--full are strict (fail-fast if spindump privilege is unavailable)"),
+    ]
+    let diagnosisParamRows: [(String, String)] = [
+        ("--duration <SECS>", "Legacy shortcut: set all diagnosis durations"),
+        ("--sample-duration <SECS>", "sample duration (default: 10, min: 1)"),
+        ("--sample-interval-ms <MS>", "sample interval in ms (default: 1, min: 1)"),
+        ("--spindump-duration <SECS>", "per-process spindump duration (default: 10, min: 1)"),
+        ("--spindump-interval-ms <MS>", "per-process spindump interval in ms (default: 10, min: 1)"),
+        ("--spindump-system-duration <SECS>", "system spindump duration for --full (default: 10, min: 1)"),
+        ("--spindump-system-interval-ms <MS>", "system spindump interval in ms for --full (default: 10, min: 1)"),
+        ("--outdir <DIR>", "Output directory (default: ./hung_diag_<timestamp>)"),
+    ]
+    let exampleRows: [(String, String)] = [
+        ("hung_detect", "Detect hung apps (exit 1 if any found)"),
+        ("hung_detect --all", "List all GUI apps with full details"),
+        ("hung_detect --pid 913", "Show details for a specific PID"),
+        ("hung_detect --name Chrome", "Show details for Chrome processes"),
+        ("hung_detect --json", "Machine-readable output"),
+        ("hung_detect --monitor", "Watch for hung state changes"),
+        ("hung_detect --monitor --json | jq .", "Stream events as NDJSON"),
+        ("hung_detect -m --name Safari --interval 2", "Monitor Safari every 2s"),
+        ("hung_detect --sample", "Detect + sample hung processes"),
+        ("sudo hung_detect -m --full", "Monitor + full auto-diagnose on hung"),
+        ("sudo hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5", "Monitor + full auto-diagnose with 5s spindumps"),
+        ("sudo hung_detect --full --spindump-duration 5 --spindump-system-duration 5", "Full diagnosis with 5s capture"),
+        ("hung_detect -m --sample", "Monitor + auto-diagnose on hung"),
+    ]
+
+    let optionsText = renderHelpRows(optionRows)
+    let diagnosisText = renderHelpRows(diagnosisIntroRows) + "\n\n" + renderHelpRows(diagnosisParamRows)
+    let examplesText = exampleRows.map { cmd, desc in
+        "  # \(desc)\n  \(cmd)"
+    }.joined(separator: "\n\n")
+
     print("""
     hung_detect — macOS Hung App Detector
     Uses the same Window Server API as Activity Monitor.
@@ -330,39 +437,35 @@ func printHelp() {
     By default scans ALL GUI processes and only shows Not Responding ones.
 
     USAGE: hung_detect [OPTIONS]
+    Note: options shown as --foo <BAR> require a value.
 
     OPTIONS:
-      --all, -a           Show all processes (default: only Not Responding)
-      --sha               Show SHA-256 column
-      --pid <PID>         Check specific PID (repeatable, shows all statuses)
-      --name <NAME>       Match name/bundle id (repeatable, shows all statuses)
-      --monitor, -m       Continuous monitoring mode (Ctrl+C to stop)
-      --interval <SECS>   Polling interval for monitor mode (default: 3, min: 0.5)
-      --json              JSON output (NDJSON in monitor mode)
-      --no-color          Disable ANSI colors
-      -h, --help          Show help
+    \(optionsText)
 
     EXIT CODES: 0 = all ok, 1 = hung detected, 2 = error
 
     DIAGNOSIS:
-      --sample              Run `sample` on each hung process
-      --spindump            Also run per-process spindump (implies --sample, needs root)
-      --full                Also run system-wide spindump (implies --spindump, needs root)
-      --duration <SECS>     Duration for sample/spindump (default: 3, min: 1)
-      --outdir <DIR>        Output directory (default: ./hung_diag_<timestamp>)
+    \(diagnosisText)
 
     EXAMPLES:
-      hung_detect                           Detect hung apps (exit 1 if any found)
-      hung_detect --all                     List all GUI apps with full details
-      hung_detect --name Chrome             Show details for Chrome processes
-      hung_detect --json                    Machine-readable output
-      hung_detect --monitor                 Watch for hung state changes
-      hung_detect --monitor --json | jq .   Stream events as NDJSON
-      hung_detect -m --name Safari --interval 2  Monitor Safari every 2s
-      hung_detect --sample                    Detect + sample hung processes
-      sudo hung_detect --full --duration 5    Full diagnosis with 5s capture
-      hung_detect -m --sample                 Monitor + auto-diagnose on hung
+    \(examplesText)
     """)
+}
+
+private func requireSpindumpPrivilegesIfNeeded(opts: Options) -> Bool {
+    guard opts.spindump || opts.full else { return true }
+    if getuid() == 0 { return true }
+
+    let probe = runDiagCommand(
+        executablePath: "/usr/bin/sudo",
+        arguments: ["-n", "/usr/sbin/spindump", "-h"],
+        timeout: 5)
+    if probe.success { return true }
+
+    fputs("""
+    Error: --spindump/--full runs in strict mode and requires spindump privileges. Re-run with sudo, or configure passwordless sudo for /usr/sbin/spindump.
+    """.trimmingCharacters(in: .whitespaces) + "\n", stderr)
+    return false
 }
 
 // MARK: - ANSI Colors
@@ -634,6 +737,22 @@ private let outdirLock = NSLock()
 private let diagnosisQueue = DispatchQueue(label: "com.hung_detect.diagnosis",
                                             attributes: .concurrent)
 
+private func sudoOwner() -> (uid: UInt32, gid: UInt32)? {
+    guard let uidStr = ProcessInfo.processInfo.environment["SUDO_UID"],
+          let uid = UInt32(uidStr) else { return nil }
+    let gid = ProcessInfo.processInfo.environment["SUDO_GID"].flatMap { UInt32($0) } ?? uid
+    return (uid, gid)
+}
+
+private func chownPath(_ path: String, uid: UInt32, gid: UInt32) {
+    _ = path.withCString { chown($0, uid, gid) }
+}
+
+private func fixOwnershipPath(_ path: String) {
+    guard let owner = sudoOwner() else { return }
+    chownPath(path, uid: owner.uid, gid: owner.gid)
+}
+
 private func resolveDiagOutdir(opts: Options) -> String {
     outdirLock.lock()
     defer { outdirLock.unlock() }
@@ -648,6 +767,7 @@ private func resolveDiagOutdir(opts: Options) -> String {
         dir = "hung_diag_\(df.string(from: Date()))"
     }
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    fixOwnership(dir: dir)
     resolvedOutdir = dir
     return dir
 }
@@ -685,14 +805,15 @@ private func runDiagCommand(executablePath: String, arguments: [String],
     return (proc.terminationStatus == 0, errStr)
 }
 
-private func runSample(pid: pid_t, name: String, duration: Int,
+private func runSample(pid: pid_t, name: String, duration: Int, intervalMs: Int,
                        outdir: String, timestamp: String) -> DiagToolResult {
     let outfile = "\(outdir)/\(timestamp)_\(safeName(name))_\(pid).sample.txt"
     let start = Date()
     let (ok, errStr) = runDiagCommand(
         executablePath: "/usr/bin/sample",
-        arguments: ["\(pid)", "\(duration)", "1", "-file", outfile],
+        arguments: ["\(pid)", "\(duration)", "\(intervalMs)", "-file", outfile],
         timeout: TimeInterval(duration + 30))
+    fixOwnershipPath(outfile)
     let elapsed = Date().timeIntervalSince(start)
     return DiagToolResult(pid: pid, name: name, tool: "sample",
                           outputPath: ok ? outfile : nil,
@@ -700,7 +821,7 @@ private func runSample(pid: pid_t, name: String, duration: Int,
                           error: ok ? nil : (errStr.isEmpty ? "sample failed" : errStr))
 }
 
-private func runSpindumpPid(pid: pid_t, name: String, duration: Int,
+private func runSpindumpPid(pid: pid_t, name: String, duration: Int, intervalMs: Int,
                             outdir: String, timestamp: String) -> DiagToolResult {
     let outfile = "\(outdir)/\(timestamp)_\(safeName(name))_\(pid).spindump.txt"
     let start = Date()
@@ -710,14 +831,15 @@ private func runSpindumpPid(pid: pid_t, name: String, duration: Int,
     let args: [String]
     if isRoot {
         exe = "/usr/sbin/spindump"
-        args = ["\(pid)", "\(duration)", "-file", outfile]
+        args = ["\(pid)", "\(duration)", "\(intervalMs)", "-file", outfile]
     } else {
         exe = "/usr/bin/sudo"
-        args = ["-n", "/usr/sbin/spindump", "\(pid)", "\(duration)", "-file", outfile]
+        args = ["-n", "/usr/sbin/spindump", "\(pid)", "\(duration)", "\(intervalMs)", "-file", outfile]
     }
 
     let (ok, errStr) = runDiagCommand(executablePath: exe, arguments: args,
                                        timeout: TimeInterval(duration + 30))
+    fixOwnershipPath(outfile)
     let elapsed = Date().timeIntervalSince(start)
 
     var finalErr: String? = nil
@@ -733,7 +855,7 @@ private func runSpindumpPid(pid: pid_t, name: String, duration: Int,
                           elapsed: elapsed, error: finalErr)
 }
 
-private func runSpindumpSystem(duration: Int, outdir: String,
+private func runSpindumpSystem(duration: Int, intervalMs: Int, outdir: String,
                                timestamp: String) -> DiagToolResult {
     let outfile = "\(outdir)/\(timestamp)_system.spindump.txt"
     let start = Date()
@@ -743,14 +865,15 @@ private func runSpindumpSystem(duration: Int, outdir: String,
     let args: [String]
     if isRoot {
         exe = "/usr/sbin/spindump"
-        args = ["\(duration)", "-file", outfile]
+        args = ["-noTarget", "\(duration)", "\(intervalMs)", "-file", outfile]
     } else {
         exe = "/usr/bin/sudo"
-        args = ["-n", "/usr/sbin/spindump", "\(duration)", "-file", outfile]
+        args = ["-n", "/usr/sbin/spindump", "-noTarget", "\(duration)", "\(intervalMs)", "-file", outfile]
     }
 
     let (ok, errStr) = runDiagCommand(executablePath: exe, arguments: args,
                                        timeout: TimeInterval(duration + 60))
+    fixOwnershipPath(outfile)
     let elapsed = Date().timeIntervalSince(start)
 
     var finalErr: String? = nil
@@ -767,16 +890,13 @@ private func runSpindumpSystem(duration: Int, outdir: String,
 }
 
 private func fixOwnership(dir: String) {
-    guard let uidStr = ProcessInfo.processInfo.environment["SUDO_UID"],
-          let uid = UInt32(uidStr) else { return }
-    let gid = ProcessInfo.processInfo.environment["SUDO_GID"].flatMap { UInt32($0) } ?? uid
+    guard let owner = sudoOwner() else { return }
+    chownPath(dir, uid: owner.uid, gid: owner.gid)
 
     let fm = FileManager.default
-    guard let items = try? fm.contentsOfDirectory(atPath: dir) else { return }
-
-    chown(dir, uid, gid)
-    for item in items {
-        chown("\(dir)/\(item)", uid, gid)
+    guard let walker = fm.enumerator(atPath: dir) else { return }
+    for case let rel as String in walker {
+        chownPath("\(dir)/\(rel)", uid: owner.uid, gid: owner.gid)
     }
 }
 
@@ -797,7 +917,9 @@ private func runDiagnosisSingleShot(hungProcesses: [(pid: pid_t, name: String)],
             group.enter()
             diagnosisQueue.async {
                 let r = runSample(pid: proc.pid, name: proc.name,
-                                  duration: opts.diagDuration, outdir: outdir,
+                                  duration: opts.sampleDuration,
+                                  intervalMs: opts.sampleIntervalMs,
+                                  outdir: outdir,
                                   timestamp: timestamp)
                 resultsLock.lock(); results.append(r); resultsLock.unlock()
                 group.leave()
@@ -807,7 +929,9 @@ private func runDiagnosisSingleShot(hungProcesses: [(pid: pid_t, name: String)],
             group.enter()
             diagnosisQueue.async {
                 let r = runSpindumpPid(pid: proc.pid, name: proc.name,
-                                       duration: opts.diagDuration, outdir: outdir,
+                                       duration: opts.spindumpDuration,
+                                       intervalMs: opts.spindumpIntervalMs,
+                                       outdir: outdir,
                                        timestamp: timestamp)
                 resultsLock.lock(); results.append(r); resultsLock.unlock()
                 group.leave()
@@ -819,7 +943,9 @@ private func runDiagnosisSingleShot(hungProcesses: [(pid: pid_t, name: String)],
     if opts.full {
         group.enter()
         diagnosisQueue.async {
-            let r = runSpindumpSystem(duration: opts.diagDuration, outdir: outdir,
+            let r = runSpindumpSystem(duration: opts.spindumpSystemDuration,
+                                      intervalMs: opts.spindumpSystemIntervalMs,
+                                      outdir: outdir,
                                       timestamp: timestamp)
             resultsLock.lock(); results.append(r); resultsLock.unlock()
             group.leave()
@@ -855,7 +981,9 @@ private func triggerDiagnosisAsync(hungProcesses: [(pid: pid_t, name: String)],
             group.enter()
             diagnosisQueue.async {
                 let r = runSample(pid: proc.pid, name: proc.name,
-                                  duration: opts.diagDuration, outdir: outdir,
+                                  duration: opts.sampleDuration,
+                                  intervalMs: opts.sampleIntervalMs,
+                                  outdir: outdir,
                                   timestamp: timestamp)
                 resultsLock.lock(); results.append(r); resultsLock.unlock()
                 group.leave()
@@ -865,7 +993,9 @@ private func triggerDiagnosisAsync(hungProcesses: [(pid: pid_t, name: String)],
             group.enter()
             diagnosisQueue.async {
                 let r = runSpindumpPid(pid: proc.pid, name: proc.name,
-                                       duration: opts.diagDuration, outdir: outdir,
+                                       duration: opts.spindumpDuration,
+                                       intervalMs: opts.spindumpIntervalMs,
+                                       outdir: outdir,
                                        timestamp: timestamp)
                 resultsLock.lock(); results.append(r); resultsLock.unlock()
                 group.leave()
@@ -876,7 +1006,9 @@ private func triggerDiagnosisAsync(hungProcesses: [(pid: pid_t, name: String)],
     if opts.full {
         group.enter()
         diagnosisQueue.async {
-            let r = runSpindumpSystem(duration: opts.diagDuration, outdir: outdir,
+            let r = runSpindumpSystem(duration: opts.spindumpSystemDuration,
+                                      intervalMs: opts.spindumpSystemIntervalMs,
+                                      outdir: outdir,
                                       timestamp: timestamp)
             resultsLock.lock(); results.append(r); resultsLock.unlock()
             group.leave()
@@ -1187,6 +1319,10 @@ private func runMonitor(opts: Options) -> Int32 {
 func main() -> Int32 {
     let opts = parseArgs()
     if opts.help { printHelp(); return 0 }
+    if opts.version {
+        print("hung_detect \(toolVersion)")
+        return 0
+    }
 
     // Colors: disable if --no-color, not a tty, or NO_COLOR env set
     C.enabled = !opts.noColor && !opts.json && isatty(STDOUT_FILENO) != 0
@@ -1196,6 +1332,8 @@ func main() -> Int32 {
         fputs("Error: failed to load private APIs. Requires macOS with Window Server.\n", stderr)
         return 2
     }
+
+    guard requireSpindumpPrivilegesIfNeeded(opts: opts) else { return 2 }
 
     if opts.monitor {
         exit(runMonitor(opts: opts))

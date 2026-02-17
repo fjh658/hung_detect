@@ -9,7 +9,7 @@
 
 - 用活动监视器风格的信号判断 GUI 应用是否未响应。
 - 支持通用二进制构建（`arm64` + `x86_64`）。
-- 可配置最小系统版本，默认 `12.0`。
+- 最低系统版本由 `Package.swift` 定义（`macOS 12+`）。
 - 支持终端表格输出和 JSON 输出。
 - 输出进程元信息：PID、父 PID、用户、Bundle ID、架构、沙盒状态、防睡眠状态、运行时长、可执行文件路径。
 - 可选显示 SHA-256。
@@ -19,20 +19,14 @@
 ## 🧰 环境要求
 
 - macOS
-- Xcode 命令行工具（`swiftc`、`xcrun`、`lipo`）
+- Xcode 命令行工具（`swift`、`xcrun`）
 
 ## 🏗️ 构建
 
-默认构建（`MIN_MACOS=12.0`）：
+构建通用二进制：
 
 ```bash
 make build
-```
-
-指定最小系统版本：
-
-```bash
-make build MIN_MACOS=12.0
 ```
 
 检查产物架构和 `minos`：
@@ -44,7 +38,7 @@ make check
 兼容脚本入口（内部会转调 Makefile）：
 
 ```bash
-./build_hung_detect.sh 12.0
+./build_hung_detect.sh
 ```
 
 ## 🍺 Homebrew Tap 安装
@@ -55,21 +49,23 @@ Homebrew 安装会直接使用 `dist/` 中的预编译二进制包，不在用�
 
 ```bash
 brew tap fjh658/hung-detect /path/to/hung_detect
-brew install fjh658/hung-detect/hung-detect
+brew install hung-detect
 ```
 
 从 GitHub tap 安装：
 
 ```bash
 brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
-brew install fjh658/hung-detect/hung-detect
+brew install hung-detect
 ```
 
 发布前更新预编译包：
 
 ```bash
-make package VERSION=0.1.0 MIN_MACOS=12.0
+make package
 ```
+
+`make package` 还会基于 `Formula/hung-detect.rb.tmpl` 自动刷新 `Formula/hung-detect.rb`，并注入当前版本（来自 `Sources/hung_detect/Version.swift`）与 tarball 的 `sha256`。
 
 ## 🚀 使用示例
 
@@ -87,8 +83,10 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 
 # 诊断
 ./hung_detect --sample                    # 检测 + 对 hung 进程采样
-sudo ./hung_detect --full --duration 5    # 完整诊断，5 秒采集
+sudo ./hung_detect --full --spindump-duration 5 --spindump-system-duration 5  # 完整诊断（spindump 5 秒）
 ./hung_detect -m --sample                 # 监控 + 自动诊断
+sudo ./hung_detect -m --full              # 监控 + 完整自动诊断
+sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # 监控 + 完整自动诊断（spindump 5 秒）
 ```
 
 ## 🖼️ 截图
@@ -110,6 +108,7 @@ sudo ./hung_detect --full --duration 5    # 完整诊断，5 秒采集
 - `--name <NAME>`：按应用名或 bundle ID 过滤（可重复）。
 - `--json`：输出 JSON（始终包含 `sha256` 字段）。
 - `--no-color`：关闭 ANSI 颜色。
+- `-v`, `--version`：显示版本。
 - `-h`, `--help`：显示帮助。
 
 **监控：**
@@ -120,7 +119,16 @@ sudo ./hung_detect --full --duration 5    # 完整诊断，5 秒采集
 - `--sample`：对每个 hung 进程执行 `sample`。
 - `--spindump`：同时执行每进程 spindump（隐含 `--sample`，需要 root）。
 - `--full`：同时执行全量 spindump（隐含 `--spindump`，需要 root）。
-- `--duration <SECS>`：sample/spindump 采集时长（默认：3，最小：1）。
+- 适用范围：诊断参数同时适用于单次模式和监控模式（`-m`）。
+- 严格模式：`--spindump` / `--full` 在启动时会预检权限，权限不足直接失败退出。
+- sudo 权限修复：使用 `sudo` 运行时，输出目录和文件会回写为真实用户属主，不会留下 root 属主 dump。
+- `--duration <SECS>`：兼容旧参数，一次性设置所有诊断时长。
+- `--sample-duration <SECS>`：`sample` 采集时长（秒，默认：10，最小：1）。
+- `--sample-interval-ms <MS>`：`sample` 采样间隔（毫秒，默认：1，最小：1）。
+- `--spindump-duration <SECS>`：每进程 `spindump` 采集时长（秒，默认：10，最小：1）。
+- `--spindump-interval-ms <MS>`：每进程 `spindump` 采样间隔（毫秒，默认：10，最小：1）。
+- `--spindump-system-duration <SECS>`：`--full` 下全量 `spindump` 采集时长（秒，默认：10，最小：1）。
+- `--spindump-system-interval-ms <MS>`：`--full` 下全量 `spindump` 采样间隔（毫秒，默认：10，最小：1）。
 - `--outdir <DIR>`：输出目录（默认：`./hung_diag_<timestamp>`）。
 
 ## 📌 退出码
@@ -178,8 +186,27 @@ hung_diag_20260214_142312/
 ```bash
 ./hung_detect -m --sample                 # 自动 sample hung 进程
 sudo ./hung_detect -m --full              # 完整自动诊断
+sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # 5 秒 spindump 的完整自动诊断
 ./hung_detect -m --sample --json | jq .   # 以 NDJSON 流输出诊断事件
 ```
+
+### 触发逻辑（监控模式）
+
+- 诊断在状态切换到 hung（`responding -> not responding`）时触发，不会每次轮询都触发。
+- 监控启动时，已经处于 hung 的进程会立即触发一次诊断。
+- 进程持续 hung 不会重复触发；需要先恢复为 responding，再次变 hung 才会再次触发。
+- 每进程诊断（`sample` / 按 PID 的 `spindump`）在同一 PID 诊断进行中会去重。
+- 使用 `--full` 时，每次 hung 触发还会启动一次全量 `spindump`；即使该 PID 的每进程任务被去重，全量 `spindump` 仍可能执行。
+
+示例：
+
+- `responding -> not responding`：
+  - `--sample`：1 次 `sample`
+  - `--sample --spindump`：1 次 `sample` + 1 次每进程 `spindump`
+  - `--full`：1 次 `sample` + 1 次每进程 `spindump` + 1 次全量 `spindump`
+- `responding -> not responding -> responding -> not responding`：
+  - 通常会触发两轮诊断
+  - 若第二次 hung 发生在同一 PID 第一轮未完成前，每进程任务可能因去重被跳过
 
 ## 📄 许可证
 

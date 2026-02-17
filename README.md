@@ -9,7 +9,7 @@ It uses the same private Window Server signal used by Activity Monitor (`CGSEven
 
 - Detects unresponsive GUI apps with the Activity Monitor style signal.
 - Universal binary build (`arm64` + `x86_64`).
-- macOS deployment target configurable; default is `12.0`.
+- macOS deployment target is defined in `Package.swift` (`macOS 12+`).
 - Table output for terminal and JSON output for automation.
 - Includes process metadata: PID, parent PID, user, bundle ID, arch, sandbox state, sleep assertion state, uptime, executable path.
 - Optional SHA-256 output.
@@ -19,20 +19,14 @@ It uses the same private Window Server signal used by Activity Monitor (`CGSEven
 ## 🧰 Requirements
 
 - macOS
-- Xcode command line tools (`swiftc`, `xcrun`, `lipo`)
+- Xcode command line tools (`swift`, `xcrun`)
 
 ## 🏗️ Build
 
-Build universal binary (default `MIN_MACOS=12.0`):
+Build universal binary:
 
 ```bash
 make build
-```
-
-Build with explicit deployment target:
-
-```bash
-make build MIN_MACOS=12.0
 ```
 
 Check binary architecture and `minos`:
@@ -44,7 +38,7 @@ make check
 Legacy wrapper (delegates to Makefile):
 
 ```bash
-./build_hung_detect.sh 12.0
+./build_hung_detect.sh
 ```
 
 ## 🍺 Homebrew Tap Install
@@ -55,21 +49,23 @@ Tap this repository locally:
 
 ```bash
 brew tap fjh658/hung-detect /path/to/hung_detect
-brew install fjh658/hung-detect/hung-detect
+brew install hung-detect
 ```
 
 Install from GitHub tap:
 
 ```bash
 brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
-brew install fjh658/hung-detect/hung-detect
+brew install hung-detect
 ```
 
 Refresh prebuilt package before release:
 
 ```bash
-make package VERSION=0.1.0 MIN_MACOS=12.0
+make package
 ```
+
+`make package` also refreshes `Formula/hung-detect.rb` from `Formula/hung-detect.rb.tmpl`, injecting the current version (from `Sources/hung_detect/Version.swift`) and tarball `sha256`.
 
 ## 🚀 Usage
 
@@ -87,8 +83,10 @@ make package VERSION=0.1.0 MIN_MACOS=12.0
 
 # Diagnosis
 ./hung_detect --sample                    # Detect + sample hung processes
-sudo ./hung_detect --full --duration 5    # Full diagnosis with 5s capture
+sudo ./hung_detect --full --spindump-duration 5 --spindump-system-duration 5  # Full diagnosis with 5s spindumps
 ./hung_detect -m --sample                 # Monitor + auto-diagnose on hung
+sudo ./hung_detect -m --full              # Monitor + full auto-diagnose on hung
+sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # Monitor + full with 5s spindumps
 ```
 
 ## 🖼️ Screenshots
@@ -110,6 +108,7 @@ sudo ./hung_detect --full --duration 5    # Full diagnosis with 5s capture
 - `--name <NAME>`: filter by app name or bundle ID (repeatable).
 - `--json`: JSON output (always includes `sha256` field).
 - `--no-color`: disable ANSI colors.
+- `-v`, `--version`: show version.
 - `-h`, `--help`: show help.
 
 **Monitor:**
@@ -120,7 +119,16 @@ sudo ./hung_detect --full --duration 5    # Full diagnosis with 5s capture
 - `--sample`: run `sample` on each hung process.
 - `--spindump`: also run per-process spindump (implies `--sample`, needs root).
 - `--full`: also run system-wide spindump (implies `--spindump`, needs root).
-- `--duration <SECS>`: duration for sample/spindump (default: 3, min: 1).
+- Scope: diagnosis options apply in both single-shot and monitor (`-m`) modes.
+- Strict mode: `--spindump` / `--full` fail fast at startup if spindump privilege is unavailable.
+- Sudo ownership: when run via `sudo`, output directory/files are chowned back to the real user (no root-owned dump artifacts).
+- `--duration <SECS>`: legacy shortcut to set all diagnosis durations at once.
+- `--sample-duration <SECS>`: `sample` duration in seconds (default: 10, min: 1).
+- `--sample-interval-ms <MS>`: `sample` interval in milliseconds (default: 1, min: 1).
+- `--spindump-duration <SECS>`: per-process `spindump` duration in seconds (default: 10, min: 1).
+- `--spindump-interval-ms <MS>`: per-process `spindump` interval in milliseconds (default: 10, min: 1).
+- `--spindump-system-duration <SECS>`: system-wide `spindump` duration for `--full` (default: 10, min: 1).
+- `--spindump-system-interval-ms <MS>`: system-wide `spindump` interval for `--full` (default: 10, min: 1).
 - `--outdir <DIR>`: output directory (default: `./hung_diag_<timestamp>`).
 
 ## 📌 Exit Codes
@@ -178,8 +186,27 @@ Diagnosis integrates with monitor mode — when a process becomes hung, diagnosi
 ```bash
 ./hung_detect -m --sample                 # Auto-sample on hung
 sudo ./hung_detect -m --full              # Full auto-diagnosis
+sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # Full auto-diagnosis with 5s spindumps
 ./hung_detect -m --sample --json | jq .   # Stream diagnosis events as NDJSON
 ```
+
+### Trigger Logic (Monitor Mode)
+
+- Diagnosis is triggered on transition to hung (`responding -> not responding`), not on every poll tick.
+- On monitor startup, processes that are already hung trigger one diagnosis round immediately.
+- If a process stays hung, it will not retrigger until it becomes responsive and hangs again.
+- Per-process diagnosis (`sample` / per-PID `spindump`) is deduplicated while a PID is already being diagnosed.
+- With `--full`, each hung trigger also starts one system-wide `spindump`; this can still run even when per-PID work is deduplicated.
+
+Examples:
+
+- `responding -> not responding`:
+  - `--sample`: 1 `sample`
+  - `--sample --spindump`: 1 `sample` + 1 per-PID `spindump`
+  - `--full`: 1 `sample` + 1 per-PID `spindump` + 1 system-wide `spindump`
+- `responding -> not responding -> responding -> not responding`:
+  - usually two diagnosis rounds
+  - if the second hang happens before the first round for the same PID finishes, per-PID tools may be skipped by dedup
 
 ## 📄 License
 

@@ -1,5 +1,6 @@
 .build/
-hung_detect
+.swiftpm/
+/hung_detect
 hung_diag_*/
 .claude/
 .DS_Store
