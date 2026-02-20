@@ -22,11 +22,43 @@ private func runCommand(
     process.standardOutput = outPipe
     process.standardError = errPipe
 
+    let outRead = outPipe.fileHandleForReading
+    let errRead = errPipe.fileHandleForReading
+    let outLock = NSLock()
+    let errLock = NSLock()
+    var outData = Data()
+    var errData = Data()
+
+    outRead.readabilityHandler = { handle in
+        let chunk = handle.availableData
+        guard !chunk.isEmpty else { return }
+        outLock.lock()
+        outData.append(chunk)
+        outLock.unlock()
+    }
+    errRead.readabilityHandler = { handle in
+        let chunk = handle.availableData
+        guard !chunk.isEmpty else { return }
+        errLock.lock()
+        errData.append(chunk)
+        errLock.unlock()
+    }
+
     try process.run()
     process.waitUntilExit()
 
-    let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-    let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+    outRead.readabilityHandler = nil
+    errRead.readabilityHandler = nil
+
+    let outTail = outRead.readDataToEndOfFile()
+    let errTail = errRead.readDataToEndOfFile()
+    outLock.lock()
+    outData.append(outTail)
+    outLock.unlock()
+    errLock.lock()
+    errData.append(errTail)
+    errLock.unlock()
+
     return CommandResult(
         code: process.terminationStatus,
         stdout: String(decoding: outData, as: UTF8.self),
@@ -103,6 +135,7 @@ final class HungDetectCLITests: XCTestCase {
             "OPTIONS:",
             "DIAGNOSIS:",
             "EXAMPLES:",
+            "--foreground-only",
             "--sample-duration <SECS>",
             "--sample-interval-ms <MS>",
             "--spindump-duration <SECS>",

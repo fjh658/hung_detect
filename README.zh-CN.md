@@ -59,19 +59,26 @@ brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
 brew install hung-detect
 ```
 
-发布前更新预编译包：
+发布前更新预编译包（默认仅二进制）：
 
 ```bash
 make package
 ```
 
-`make package` 还会基于 `Formula/hung-detect.rb.tmpl` 自动刷新 `Formula/hung-detect.rb`，并注入当前版本（来自 `Sources/hung_detect/Version.swift`）与 tarball 的 `sha256`。
+如需把调试符号一起打进发布包（用于崩溃符号化）：
+
+```bash
+make package INCLUDE_DSYM=1
+```
+
+`make package` 还会基于 `Formula/hung-detect.rb.tmpl` 自动刷新 `Formula/hung-detect.rb`，并注入当前版本（来自 `Sources/hung_detect/Version.swift`）与当前打包模式下 tarball 的 `sha256`。
 
 ## 🚀 使用示例
 
 ```bash
 ./hung_detect                             # 检测 hung 应用（有则 exit 1）
 ./hung_detect --all                       # 列出所有 GUI 应用详情
+./hung_detect --foreground-only           # 仅扫描前台类型应用
 ./hung_detect --json                      # 机器可读 JSON 输出
 ./hung_detect --name Chrome               # 显示 Chrome 进程
 ./hung_detect --pid 913                   # 显示指定 PID
@@ -104,6 +111,7 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 **检测：**
 - `--all`, `-a`：显示所有匹配 GUI 进程（默认仅显示未响应进程）。
 - `--sha`：在表格输出中显示 SHA-256 列。
+- `--foreground-only`：仅包含前台类型应用（`activationPolicy == .regular`）。
 - `--pid <PID>`：按 PID 过滤（可重复）。
 - `--name <NAME>`：按应用名或 bundle ID 过滤（可重复）。
 - `--json`：输出 JSON（始终包含 `sha256` 字段）。
@@ -143,13 +151,37 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 当前实现已做回退解析：
 
 - `CGSMainConnectionID`、`CGSEventIsAppUnresponsive`
-  - 同时尝试 `SkyLight` 与 `CoreGraphics`
-  - 同时尝试无前缀和 `_` 前缀符号名
+  - 优先通过 `CFBundleGetFunctionPointerForName` 从 `SkyLight` 框架路径解析
+  - 失败后回退到 `dlsym`（`RTLD_DEFAULT` + 已加载句柄），同时尝试无前缀和 `_` 前缀符号名
 - `LSASNCreateWithPid`、`LSASNExtractHighAndLowParts`
-  - 同时尝试 `CoreServices` 与 `LaunchServices`
-  - 同时尝试 `_`、无前缀、`__` 三种符号名
+  - 优先通过 `CFBundleGetFunctionPointerForName` 从 `LaunchServices` 框架路径解析
+    （先尝试 `CoreServices.framework` 子框架路径，再尝试历史 `PrivateFrameworks` 路径）
+  - 失败后回退到 `dlsym`（`RTLD_DEFAULT` + 已加载句柄），同时尝试 `_`、无前缀、`__` 三种符号名
 
 如果必须符号都无法解析，程序会以退出码 `2` 结束。
+
+## 🔎 hung_detect vs Activity Monitor
+
+| 维度 | 活动监视器 | hung_detect | 状态 |
+|---|---|---|---|
+| hung 判定信号来源 | Window Server 私有信号 | 同样使用 CGS 信号链路（`CGSEventIsAppUnresponsive`） | 对齐 |
+| 监控机制 | push + poll | push + poll，push 不可用时自动退化为 poll-only | 对齐 |
+| 启动期 push 窗口处理 | 通过内部刷新快速收敛 | unknown PID push 会触发一次即时 rescan | 对齐 |
+| push 回调作用范围 | 前台应用类型 | push 更新仅应用于前台应用类型 | 对齐 |
+| 默认扫描范围 | 偏应用视角 | 默认全 GUI 进程（可选 `--foreground-only`） | 扩展 |
+| 输出形态 | 仅 GUI | 表格 + JSON + NDJSON 事件流 | 扩展 |
+| 诊断采集能力 | 以手动流程为主 | 内置 `sample` / `spindump` / `--full` | 扩展 |
+| spindump 权限策略 | 应用内部流程 | `--spindump` / `--full` 严格预检，失败即退出 | 有意差异 |
+| sudo 产物属主 | 不适用 | 自动回写为真实用户属主 | 扩展 |
+| 自动化集成 | 较弱 | 明确退出码与脚本化参数 | 扩展 |
+
+## 🧵 并发模型
+
+- `MonitorEngine` 状态统一收敛到主队列（`dispatchMain` + 回调切主线程）管理。
+- push 回调（`CGSRegisterNotifyProc`）与定时轮询都写入同一份主线程状态，避免竞态。
+- push 事件出现未知/过早 PID 时，会立即安排一次对账重扫，不等下一次轮询。
+- 诊断任务在独立并发队列执行；同一 PID 的去重由小粒度锁保护。
+- CGS 符号解析采用一次性加载，加载后只读，运行期不依赖可变共享状态。
 
 ## ⚡ 性能说明
 

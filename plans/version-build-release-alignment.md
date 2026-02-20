@@ -68,6 +68,9 @@ Goal: establish one clear version source and deterministic packaging flow.
     1. build
     2. tarball
     3. formula generation from template
+  - packaging mode:
+    - default `make package` includes binary only
+    - `make package INCLUDE_DSYM=1` includes binary + `.dSYM`
 
 - Added formula template:
   - `Formula/hung-detect.rb.tmpl`
@@ -105,7 +108,7 @@ Executed and passed:
 For a new release:
 
 1. Update `Sources/hung_detect/Version.swift`
-2. Run `make package`
+2. Run `make package` (or `make package INCLUDE_DSYM=1` when release artifact should include `.dSYM`)
 3. Commit:
    - source changes
    - `dist/hung-detect-<version>-macos-universal.tar.gz`

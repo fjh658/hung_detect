@@ -59,19 +59,26 @@ brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
 brew install hung-detect
 ```
 
-Refresh prebuilt package before release:
+Refresh prebuilt package before release (default: binary only):
 
 ```bash
 make package
 ```
 
-`make package` also refreshes `Formula/hung-detect.rb` from `Formula/hung-detect.rb.tmpl`, injecting the current version (from `Sources/hung_detect/Version.swift`) and tarball `sha256`.
+Include debug symbols in the release tarball when needed (for crash symbolication):
+
+```bash
+make package INCLUDE_DSYM=1
+```
+
+`make package` also refreshes `Formula/hung-detect.rb` from `Formula/hung-detect.rb.tmpl`, injecting the current version (from `Sources/hung_detect/Version.swift`) and tarball `sha256` generated for the selected packaging mode.
 
 ## 🚀 Usage
 
 ```bash
 ./hung_detect                             # Detect hung apps (exit 1 if any)
 ./hung_detect --all                       # List all GUI apps with details
+./hung_detect --foreground-only           # Only scan foreground-type apps
 ./hung_detect --json                      # Machine-readable JSON output
 ./hung_detect --name Chrome               # Show Chrome processes
 ./hung_detect --pid 913                   # Show specific PID
@@ -104,6 +111,7 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 **Detection:**
 - `--all`, `-a`: show all matched GUI processes (default shows only not responding).
 - `--sha`: include SHA-256 column in table output.
+- `--foreground-only`: only include foreground-type apps (`activationPolicy == .regular`).
 - `--pid <PID>`: filter by PID (repeatable).
 - `--name <NAME>`: filter by app name or bundle ID (repeatable).
 - `--json`: JSON output (always includes `sha256` field).
@@ -143,13 +151,37 @@ This tool intentionally uses private APIs. Symbol locations and exported names c
 The loader includes fallback resolution for:
 
 - `CGSMainConnectionID`, `CGSEventIsAppUnresponsive`
-  - from `SkyLight` and `CoreGraphics`
-  - with both plain and underscore-prefixed symbol names
+  - prefers `CFBundleGetFunctionPointerForName` from `SkyLight` framework path
+  - falls back to `dlsym` (`RTLD_DEFAULT` + loaded handles) with plain and underscore-prefixed symbol names
 - `LSASNCreateWithPid`, `LSASNExtractHighAndLowParts`
-  - from `CoreServices` and `LaunchServices`
-  - with `_`, plain, and `__` symbol-name variants
+  - prefers `CFBundleGetFunctionPointerForName` from `LaunchServices` framework paths
+    (`CoreServices.framework` subframework path first, legacy `PrivateFrameworks` path as compatibility fallback)
+  - falls back to `dlsym` (`RTLD_DEFAULT` + loaded handles) with `_`, plain, and `__` symbol-name variants
 
 If all required symbols cannot be resolved, the program exits with code `2`.
+
+## 🔎 hung_detect vs Activity Monitor
+
+| Dimension | Activity Monitor | hung_detect | Status |
+|---|---|---|---|
+| Hung signal source | Window Server private signal | Same CGS signal path (`CGSEventIsAppUnresponsive`) | Aligned |
+| Monitor mechanism | push + poll | push + poll, fallback to poll-only when push unavailable | Aligned |
+| Startup push gap handling | fast convergence via internal state refresh | unknown PID push triggers immediate rescan | Aligned |
+| Push callback scope | foreground app type | push update applies to foreground app type | Aligned |
+| Default scan scope | app-centric | all GUI processes by default (`--foreground-only` optional) | Extended |
+| Output form | GUI only | table + JSON + NDJSON monitor stream | Extended |
+| Diagnosis capture | mostly manual workflow | built-in `sample` / `spindump` / `--full` | Extended |
+| Spindump privilege behavior | internal app flow | strict fail-fast for `--spindump` / `--full` | Intentional difference |
+| Sudo artifact ownership | N/A | chown outputs back to invoking user | Extended |
+| Automation integration | limited | stable CLI exit codes + scriptable flags | Extended |
+
+## 🧵 Concurrency Model
+
+- `MonitorEngine` state is confined to the main queue (`dispatchMain` + main-queue callback handoff).
+- Push callbacks (`CGSRegisterNotifyProc`) and polling both update the same main-thread state map to avoid races.
+- Unknown/early push PID events schedule an immediate reconcile rescan instead of waiting for the next polling tick.
+- Diagnosis work runs on a dedicated concurrent queue, with per-PID dedup guarded by a small lock.
+- CGS symbol resolution is one-time and immutable after load, so runtime reads do not need mutable shared state.
 
 ## ⚡ Performance Notes
 

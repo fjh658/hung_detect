@@ -12,6 +12,11 @@ SWIFT ?= swift
 BUILD_DIR := .build/macos-universal
 DIST_DIR := dist
 DIST_TARBALL := $(DIST_DIR)/hung-detect-$(VERSION)-macos-universal.tar.gz
+DIST_STAGE_DIR := $(BUILD_DIR)/dist-stage
+INCLUDE_DSYM ?= 0
+SWIFTPM_RELEASE_DIR = $(SWIFTPM_UNIVERSAL_SCRATCH)/apple/Products/Release
+DSYM_BUNDLE = $(SWIFTPM_RELEASE_DIR)/$(BIN).dSYM
+DSYM_DWARF = $(DSYM_BUNDLE)/Contents/Resources/DWARF/$(BIN)
 FORMULA_TEMPLATE := Formula/hung-detect.rb.tmpl
 FORMULA_FILE := Formula/hung-detect.rb
 SWIFTPM_STATE_DIR := $(CURDIR)/.swiftpm
@@ -22,6 +27,15 @@ SWIFTPM_SCRATCH_DIR := $(CURDIR)/.build/swiftpm-scratch
 SWIFTPM_MODULE_CACHE := $(SWIFTPM_STATE_DIR)/module-cache
 SWIFTPM_UNIVERSAL_SCRATCH := $(BUILD_DIR)/swiftpm-universal
 SWIFT_TEST_FLAGS ?=
+
+ifneq ($(filter-out 0 1,$(INCLUDE_DSYM)),)
+$(error INCLUDE_DSYM must be 0 or 1)
+endif
+ifeq ($(INCLUDE_DSYM),1)
+DIST_DEPS := $(BIN) $(DSYM_DWARF)
+else
+DIST_DEPS := $(BIN)
+endif
 
 .PHONY: all build package formula run test check clean help
 
@@ -34,9 +48,18 @@ package: build $(DIST_TARBALL) formula
 $(DIST_DIR):
 	mkdir -p "$(DIST_DIR)"
 
-$(DIST_TARBALL): $(BIN) | $(DIST_DIR)
-	tar -czf "$@" "$(BIN)"
+$(DIST_TARBALL): $(DIST_DEPS) | $(DIST_DIR)
+	rm -rf "$(DIST_STAGE_DIR)"
+	mkdir -p "$(DIST_STAGE_DIR)"
+	cp "$(BIN)" "$(DIST_STAGE_DIR)/$(BIN)"
+ifeq ($(INCLUDE_DSYM),1)
+	cp -R "$(DSYM_BUNDLE)" "$(DIST_STAGE_DIR)/$(BIN).dSYM"
+	tar -C "$(DIST_STAGE_DIR)" -czf "$@" "$(BIN)" "$(BIN).dSYM"
+else
+	tar -C "$(DIST_STAGE_DIR)" -czf "$@" "$(BIN)"
+endif
 	@echo "Packaged: $(abspath $(DIST_TARBALL))"
+	@echo "Include dSYM: $(INCLUDE_DSYM)"
 	@shasum -a 256 "$(DIST_TARBALL)"
 
 formula: $(FORMULA_FILE)
@@ -71,6 +94,9 @@ $(BIN): Package.swift $(SRC) | $(BUILD_DIR)
 	cp "$(SWIFTPM_UNIVERSAL_SCRATCH)/apple/Products/Release/$(BIN)" "$@"
 	@echo "Built: $(abspath $(BIN))"
 
+$(DSYM_DWARF): $(BIN)
+	@test -f "$@" || (echo "Error: missing dSYM artifact: $@" >&2; exit 2)
+
 run: build
 	./$(BIN)
 
@@ -101,7 +127,8 @@ clean:
 help:
 	@echo "Targets:"
 	@echo "  make build                    Build universal binary (SwiftPM --arch arm64 --arch x86_64)"
-	@echo "  make package                  Build tarball + refresh Formula/hung-detect.rb (version from $(VERSION_FILE))"
+	@echo "  make package                  Build tarball (default: binary only) + refresh Formula/hung-detect.rb"
+	@echo "                                Set INCLUDE_DSYM=1 to package binary + .dSYM"
 	@echo "  make run                      Build and run detector"
 	@echo "  make test                     Run CLI unit tests"
 	@echo "  make check                    Show architecture/minos metadata"

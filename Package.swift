@@ -13,8 +13,17 @@ let package = Package(
         ),
     ],
     targets: [
+        .target(
+            name: "CGSInternalShim",
+            path: "Sources/CGSInternalShim",
+            publicHeadersPath: "include",
+            cSettings: [
+                .headerSearchPath("../../third_party/CGSInternal"),
+            ]
+        ),
         .executableTarget(
             name: "hung_detect",
+            dependencies: ["CGSInternalShim"],
             path: "Sources/hung_detect",
             sources: ["main.swift", "Version.swift"],
             linkerSettings: [
@@ -25,6 +34,11 @@ let package = Package(
             name: "HungDetectCLITests",
             dependencies: ["hung_detect"],
             path: "Tests/HungDetectCLITests"
+        ),
+        .testTarget(
+            name: "HungDetectCoreTests",
+            dependencies: ["hung_detect"],
+            path: "Tests/HungDetectCoreTests"
         ),
     ]
 )
