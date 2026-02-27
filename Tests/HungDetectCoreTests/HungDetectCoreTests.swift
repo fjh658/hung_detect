@@ -257,7 +257,7 @@ final class HungDetectCoreTests: XCTestCase {
         let previous: [pid_t: ProcessSnapshot] = [
             100: snapshot(name: "Alpha", bundleID: "com.test.alpha", responding: true),
             101: snapshot(name: "Beta", bundleID: "com.test.beta", responding: false),
-            102: snapshot(name: "Gamma", bundleID: "com.test.gamma", responding: true),
+            102: snapshot(name: "Gamma", bundleID: "com.test.gamma", responding: false),
             103: snapshot(name: "Old", bundleID: "com.test.old", responding: true),
         ]
         let current: [pid_t: ProcessSnapshot] = [
@@ -292,13 +292,10 @@ final class HungDetectCoreTests: XCTestCase {
     }
 
     func testJSONRendererMonitorMetaOutput() {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
         let output = captureStdout {
             JSONRenderer.renderMonitorMeta(type: "monitor_start",
                                            interval: 3.0,
-                                           pushAvailable: true,
-                                           formatter: formatter)
+                                           pushAvailable: true)
         }
         XCTAssertTrue(output.contains("\"event\":\"monitor_start\""))
         XCTAssertTrue(output.contains("\"interval\":3.0"))
@@ -306,15 +303,13 @@ final class HungDetectCoreTests: XCTestCase {
     }
 
     func testJSONRendererMonitorEventWithNullBundleID() {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
         let event = MonitorEvent(timestamp: Date(timeIntervalSince1970: 1_700_000_200),
                                  eventType: .becameHung,
                                  pid: 321,
                                  name: "FrozenApp",
                                  bundleID: "-")
         let output = captureStdout {
-            JSONRenderer.renderMonitorEvent(event, formatter: formatter)
+            JSONRenderer.renderMonitorEvent(event)
         }
         XCTAssertTrue(output.contains("\"event\":\"became_hung\""))
         XCTAssertTrue(output.contains("\"pid\":321"))
@@ -379,5 +374,141 @@ final class HungDetectCoreTests: XCTestCase {
         XCTAssertTrue(output.contains("BadApp (PID 42):"))
         XCTAssertTrue(output.contains("sample"))
         XCTAssertTrue(output.contains("sample failed"))
+    }
+
+    // MARK: - diffStates additional coverage
+
+    func testDiffMonitorStatesRespondingProcessExitsSilently() {
+        let now = Date(timeIntervalSince1970: 1_700_000_300)
+        let previous: [pid_t: ProcessSnapshot] = [
+            200: snapshot(name: "Healthy", bundleID: "com.test.healthy", responding: true),
+        ]
+        let events = MonitorEngine.diffStates(previous: previous, current: [:], now: now)
+        // Responding process disappearing should NOT generate any event (noise suppression).
+        XCTAssertTrue(events.isEmpty, "Expected no events for responding process exit, got: \(events)")
+    }
+
+    func testDiffMonitorStatesPIDReuseNewResponding() {
+        let now = Date(timeIntervalSince1970: 1_700_000_400)
+        let previous: [pid_t: ProcessSnapshot] = [
+            300: snapshot(name: "OldApp", bundleID: "com.test.old", responding: true),
+        ]
+        let current: [pid_t: ProcessSnapshot] = [
+            300: snapshot(name: "NewApp", bundleID: "com.test.new", responding: true),
+        ]
+        let events = MonitorEngine.diffStates(previous: previous, current: current, now: now)
+        let signatures = Set(events.map { "\($0.eventType.rawValue)|\($0.pid)|\($0.name)" })
+        // PID reuse: EXIT for old process, but no becameHung since new is responding.
+        XCTAssertEqual(events.count, 1)
+        XCTAssertTrue(signatures.contains("process_exited|300|OldApp"))
+    }
+
+    func testDiffMonitorStatesNoChange() {
+        let now = Date(timeIntervalSince1970: 1_700_000_500)
+        let state: [pid_t: ProcessSnapshot] = [
+            400: snapshot(name: "Stable", bundleID: "com.test.stable", responding: true),
+            401: snapshot(name: "StillHung", bundleID: "com.test.hung", responding: false),
+        ]
+        let events = MonitorEngine.diffStates(previous: state, current: state, now: now)
+        XCTAssertTrue(events.isEmpty, "Expected no events when state is unchanged, got: \(events)")
+    }
+
+    func testDiffMonitorStatesHungProcessExitReportsExit() {
+        let now = Date(timeIntervalSince1970: 1_700_000_600)
+        let previous: [pid_t: ProcessSnapshot] = [
+            500: snapshot(name: "HungApp", bundleID: "com.test.hung", responding: false),
+        ]
+        let events = MonitorEngine.diffStates(previous: previous, current: [:], now: now)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events[0].eventType.rawValue, "process_exited")
+        XCTAssertEqual(events[0].pid, 500)
+        XCTAssertEqual(events[0].name, "HungApp")
+    }
+
+    // MARK: - parseArgs basic flags coverage
+
+    func testParseArgsJsonFlag() {
+        let opts = CLI.parseArgs(["--json"])
+        XCTAssertTrue(opts.json)
+    }
+
+    func testParseArgsNoColorFlag() {
+        let opts = CLI.parseArgs(["--no-color"])
+        XCTAssertTrue(opts.noColor)
+    }
+
+    func testParseArgsAllFlag() {
+        let opts = CLI.parseArgs(["--all"])
+        XCTAssertTrue(opts.showAll)
+        let short = CLI.parseArgs(["-a"])
+        XCTAssertTrue(short.showAll)
+    }
+
+    func testParseArgsShaFlag() {
+        let opts = CLI.parseArgs(["--sha"])
+        XCTAssertTrue(opts.showSHA)
+    }
+
+    func testParseArgsMonitorFlag() {
+        let opts = CLI.parseArgs(["--monitor"])
+        XCTAssertTrue(opts.monitor)
+        let short = CLI.parseArgs(["-m"])
+        XCTAssertTrue(short.monitor)
+    }
+
+    func testParseArgsPidAndNameFilters() {
+        let opts = CLI.parseArgs(["--pid", "123", "--pid", "456", "--name", "Foo", "--name", "Bar"])
+        XCTAssertEqual(opts.pids, [123, 456])
+        XCTAssertEqual(opts.names, ["Foo", "Bar"])
+    }
+
+    func testParseArgsVersionAndHelpFlags() {
+        let v = CLI.parseArgs(["--version"])
+        XCTAssertTrue(v.version)
+        let vShort = CLI.parseArgs(["-v"])
+        XCTAssertTrue(vShort.version)
+        let h = CLI.parseArgs(["--help"])
+        XCTAssertTrue(h.help)
+        let hShort = CLI.parseArgs(["-h"])
+        XCTAssertTrue(hShort.help)
+    }
+
+    func testParseArgsOutdir() {
+        let opts = CLI.parseArgs(["--outdir", "/tmp/test_dir"])
+        XCTAssertEqual(opts.outdir, "/tmp/test_dir")
+    }
+
+    func testParseArgsIntervalValue() {
+        let opts = CLI.parseArgs(["--interval", "5.5"])
+        XCTAssertEqual(opts.interval, 5.5, accuracy: 0.0001)
+    }
+
+    // MARK: - Renderer version/build_time fields
+
+    func testJSONRendererMonitorMetaIncludesVersionAndBuildTime() {
+        let output = captureStdout {
+            JSONRenderer.renderMonitorMeta(type: "monitor_start",
+                                           interval: 3.0,
+                                           pushAvailable: true)
+        }
+        XCTAssertTrue(output.contains("\"version\":"), "Missing version in monitor meta JSON")
+        XCTAssertTrue(output.contains("\"build_time\":"), "Missing build_time in monitor meta JSON")
+    }
+
+    func testTableRendererMonitorMetaStartIncludesVersion() {
+        let wasEnabled = C.enabled
+        C.enabled = false
+        defer { C.enabled = wasEnabled }
+
+        let output = captureStdout {
+            TableRenderer.renderMonitorMeta(type: "monitor_start",
+                                            interval: 3.0,
+                                            pushActive: true,
+                                            hungCount: 0)
+        }
+        XCTAssertTrue(output.contains("hung_detect"), "Missing hung_detect in start banner")
+        XCTAssertTrue(output.contains("(built "), "Missing build time in start banner")
+        XCTAssertTrue(output.contains("started "),
+                      "Missing 'started' keyword. Output bytes: \(Array(output.utf8))")
     }
 }

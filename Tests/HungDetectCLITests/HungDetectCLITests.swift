@@ -168,11 +168,15 @@ final class HungDetectCLITests: XCTestCase {
     func testVersionOption() throws {
         let long = try runCLI(["--version"])
         XCTAssertEqual(long.code, 0, long.stderr)
-        XCTAssertEqual(long.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "hung_detect \(Self.expectedVersion)")
+        let longOut = long.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(longOut.hasPrefix("hung_detect \(Self.expectedVersion) (built "),
+                      "Expected version prefix, got: \(longOut)")
 
         let short = try runCLI(["-v"])
         XCTAssertEqual(short.code, 0, short.stderr)
-        XCTAssertEqual(short.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "hung_detect \(Self.expectedVersion)")
+        let shortOut = short.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(shortOut.hasPrefix("hung_detect \(Self.expectedVersion) (built "),
+                      "Expected version prefix, got: \(shortOut)")
     }
 
     func testMissingValueErrors() throws {
@@ -224,5 +228,121 @@ final class HungDetectCLITests: XCTestCase {
         ])
         XCTAssertEqual(result.code, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("DIAGNOSIS:"))
+    }
+
+    // MARK: - Default scan
+
+    func testDefaultScanExitCodeAndHeader() throws {
+        let result = try runCLI([])
+        // Exit 0 (no hung) or 1 (hung found) — both are valid runtime outcomes, not errors.
+        XCTAssertTrue(result.code == 0 || result.code == 1,
+                      "Expected exit 0 or 1, got \(result.code)\nstderr=\(result.stderr)")
+        // Header line contains version and scan time
+        assertRegex(result.stdout, "hung_detect \(Self.expectedVersion) \\(built [^)]+\\) scanned \\d{4}-\\d{2}-\\d{2}T")
+    }
+
+    // MARK: - JSON output structure
+
+    func testJSONOutputStructure() throws {
+        // Use --name Finder — Finder is always running
+        let result = try runCLI(["--json", "--name", "Finder"])
+        XCTAssertTrue(result.code == 0 || result.code == 1,
+                      "Unexpected exit code \(result.code)\nstderr=\(result.stderr)")
+
+        let data = result.stdout.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+        // Top-level traceability fields
+        XCTAssertEqual(obj["version"] as? String, Self.expectedVersion)
+        XCTAssertNotNil(obj["build_time"] as? String, "Missing build_time")
+        XCTAssertNotNil(obj["scan_time"] as? String, "Missing scan_time")
+
+        // Summary object
+        let summary = obj["summary"] as? [String: Any]
+        XCTAssertNotNil(summary, "Missing summary")
+        XCTAssertNotNil(summary?["total"] as? Int)
+        XCTAssertNotNil(summary?["not_responding"] as? Int)
+        XCTAssertNotNil(summary?["ok"] as? Int)
+
+        // Processes array with expected fields
+        let processes = obj["processes"] as? [[String: Any]]
+        XCTAssertNotNil(processes, "Missing processes array")
+        XCTAssertFalse(processes!.isEmpty, "Expected at least one process (Finder)")
+        let proc = processes![0]
+        for key in ["pid", "ppid", "user", "name", "bundle_id", "executable_path",
+                     "sha256", "arch", "codesign_authority", "sandboxed",
+                     "preventing_sleep", "elapsed_seconds", "responding"] {
+            XCTAssertTrue(proc.keys.contains(key), "Missing key '\(key)' in process object")
+        }
+    }
+
+    // MARK: - PID / name filters
+
+    func testPidFilterShowsProcess() throws {
+        // Get Finder's PID via the binary itself
+        let json = try runCLI(["--json", "--name", "Finder"])
+        let data = json.stdout.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let procs = obj["processes"] as! [[String: Any]]
+        let finderPid = procs[0]["pid"] as! Int
+
+        let result = try runCLI(["--pid", "\(finderPid)"])
+        XCTAssertTrue(result.code == 0 || result.code == 1)
+        XCTAssertTrue(result.stdout.contains("Finder"), "Expected Finder in output")
+    }
+
+    func testNameFilterShowsProcess() throws {
+        let result = try runCLI(["--name", "Finder"])
+        XCTAssertTrue(result.code == 0 || result.code == 1)
+        XCTAssertTrue(result.stdout.contains("Finder"), "Expected Finder in output")
+    }
+
+    func testNonExistentPidExitsWith2() throws {
+        try assertParseError(["--pid", "99999"], message: "No matching processes found")
+    }
+
+    func testNonExistentNameExitsWith2() throws {
+        try assertParseError(["--name", "nonexistent_app_xyz_999"], message: "No matching processes found")
+    }
+
+    // MARK: - Display flags
+
+    func testAllFlagShowsMultipleProcesses() throws {
+        let result = try runCLI(["--all"])
+        XCTAssertTrue(result.code == 0 || result.code == 1)
+        // --all should show many processes; at least the table header + a few rows
+        let lines = result.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
+        XCTAssertGreaterThan(lines.count, 5, "Expected multiple output lines with --all")
+    }
+
+    func testShortAllFlag() throws {
+        let result = try runCLI(["-a"])
+        XCTAssertTrue(result.code == 0 || result.code == 1)
+        let lines = result.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
+        XCTAssertGreaterThan(lines.count, 5, "Expected multiple output lines with -a")
+    }
+
+    func testForegroundOnlyReducesScope() throws {
+        let all = try runCLI(["--all"])
+        let fg = try runCLI(["--foreground-only", "--all"])
+        // --foreground-only should produce fewer or equal lines
+        let allLines = all.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
+        let fgLines = fg.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
+        XCTAssertLessThanOrEqual(fgLines.count, allLines.count,
+                                  "--foreground-only should not produce more output than --all alone")
+    }
+
+    func testNoColorFlagSuppressesANSI() throws {
+        let result = try runCLI(["--no-color", "--name", "Finder"])
+        XCTAssertTrue(result.code == 0 || result.code == 1)
+        // ANSI escape sequences start with ESC (0x1b)
+        XCTAssertFalse(result.stdout.contains("\u{1b}"),
+                       "Output should not contain ANSI escape codes with --no-color")
+    }
+
+    func testShaFlagShowsSHAColumn() throws {
+        let result = try runCLI(["--sha", "--name", "Finder"])
+        XCTAssertTrue(result.code == 0 || result.code == 1)
+        XCTAssertTrue(result.stdout.contains("SHA"), "Expected SHA column header")
     }
 }

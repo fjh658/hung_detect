@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0a1828"/>
+      <stop offset="50%" stop-color="#0d2137"/>
+      <stop offset="100%" stop-color="#0a1520"/>
+    </linearGradient>
+    <linearGradient id="nodeGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a4a72"/>
+      <stop offset="100%" stop-color="#0d2137"/>
+    </linearGradient>
+    <linearGradient id="centerGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2563a8"/>
+      <stop offset="100%" stop-color="#143764"/>
+    </linearGradient>
+    <linearGradient id="warnGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2b1b14"/>
+      <stop offset="100%" stop-color="#1a100c"/>
+    </linearGradient>
+    <linearGradient id="greenGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a4a3a"/>
+      <stop offset="100%" stop-color="#0d2820"/>
+    </linearGradient>
+    <linearGradient id="purpleGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3a1a6a"/>
+      <stop offset="100%" stop-color="#1a0d38"/>
+    </linearGradient>
+    <linearGradient id="pillGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#295f90"/>
+      <stop offset="100%" stop-color="#1a4a72"/>
+    </linearGradient>
+    <marker id="arrGold" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#e8a020"/>
+    </marker>
+    <marker id="arrBlue" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#7aaad4"/>
+    </marker>
+    <style>
+      .titleMain { font: 700 24px "SF Pro Display","Helvetica Neue",Arial,sans-serif; fill:#e8a020; letter-spacing:2px; }
+      .titleSub { font: 400 12px "SF Pro Text","Helvetica Neue",Arial,sans-serif; fill:#7aaad4; letter-spacing:1px; }
+      .nodeTitle { font: 700 16px "SF Pro Display","Helvetica Neue",Arial,sans-serif; fill:#ffffff; }
+      .nodeSub { font: 500 11px "SF Mono","Menlo",monospace; fill:#7aaad4; }
+      .badgeTxt { font: 500 11px "SF Pro Text","Helvetica Neue",Arial,sans-serif; fill:#e8a020; }
+      .arrLabelGold { font: 500 11px "SF Pro Text","Helvetica Neue",Arial,sans-serif; fill:#e8a020; }
+      .arrLabelBlue { font: 500 11px "SF Pro Text","Helvetica Neue",Arial,sans-serif; fill:#7aaad4; }
+      .legend { font: 500 11px "SF Pro Text","Helvetica Neue",Arial,sans-serif; fill:#8fb3d7; }
+      .annotation { font: 400 10px "SF Mono","Menlo",monospace; fill:#5a8ab0; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="960" height="720" fill="url(#bgGrad)"/>
+  <rect x="12" y="12" width="936" height="696" rx="18" fill="none" stroke="#24456a" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="480" y="52" text-anchor="middle" class="titleMain">Monitor Mode Architecture</text>
+  <text x="480" y="74" text-anchor="middle" class="titleSub">Dual-Layer Push + Poll Detection with False-Positive Filtering</text>
+
+  <!-- ═══════ Window Server ═══════ -->
+  <rect x="310" y="100" width="340" height="70" rx="14" fill="url(#purpleGrad)" stroke="#9a7ad4" stroke-width="1.5"/>
+  <text x="480" y="132" text-anchor="middle" class="nodeTitle">Window Server</text>
+  <text x="480" y="150" text-anchor="middle" class="nodeSub">macOS WindowServer daemon</text>
+
+  <!-- Arrow: WS -> Layer 1 -->
+  <path d="M480 170 L480 218" stroke="#e8a020" stroke-width="1.6" marker-end="url(#arrGold)"/>
+  <text x="492" y="200" class="arrLabelGold">CGSRegisterNotifyProc</text>
+
+  <!-- ═══════ Layer 1: Push ═══════ -->
+  <rect x="250" y="220" width="460" height="90" rx="14" fill="url(#centerGrad)" stroke="#2563a8" stroke-width="2"/>
+  <text x="480" y="252" text-anchor="middle" class="nodeTitle">Layer 1: Push Callback</text>
+  <text x="480" y="272" text-anchor="middle" class="nodeSub">instant · foreground apps only</text>
+  <line x1="290" y1="282" x2="670" y2="282" stroke="#7aaad4" stroke-opacity="0.25"/>
+  <!-- Notification badges -->
+  <rect x="290" y="288" width="180" height="18" rx="4" fill="#e8a020" fill-opacity="0.10" stroke="#c8881a" stroke-opacity="0.5"/>
+  <text x="380" y="300" text-anchor="middle" class="badgeTxt">kCGSNotificationAppUnresponsive</text>
+  <rect x="490" y="288" width="170" height="18" rx="4" fill="#e8a020" fill-opacity="0.10" stroke="#c8881a" stroke-opacity="0.5"/>
+  <text x="575" y="300" text-anchor="middle" class="badgeTxt">kCGSNotificationAppResponsive</text>
+
+  <!-- Arrow: Layer 1 -> Layer 2 -->
+  <path d="M480 310 L480 368" stroke="#7aaad4" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#arrBlue)"/>
+  <text x="492" y="335" class="arrLabelBlue">updates monitorState</text>
+  <text x="492" y="351" class="arrLabelBlue">emits MonitorEvent</text>
+
+  <!-- ═══════ DispatchSource (left) ═══════ -->
+  <rect x="50" y="386" width="150" height="60" rx="10" fill="#11253b" stroke="#7aaad4" stroke-opacity="0.5" stroke-width="1"/>
+  <text x="125" y="412" text-anchor="middle" class="nodeTitle" font-size="13" fill="#a8c8e8">DispatchSource</text>
+  <text x="125" y="430" text-anchor="middle" class="nodeSub">Timer (kqueue)</text>
+  <!-- Arrow: DS -> Layer 2 -->
+  <path d="M200 416 L248 416" stroke="#e8a020" stroke-width="1.6" marker-end="url(#arrGold)"/>
+
+  <!-- ═══════ Layer 2: Polling ═══════ -->
+  <rect x="250" y="370" width="460" height="90" rx="14" fill="url(#nodeGrad)" stroke="#b8cfe8" stroke-width="1.5"/>
+  <text x="480" y="402" text-anchor="middle" class="nodeTitle">Layer 2: Timer Polling</text>
+  <text x="480" y="422" text-anchor="middle" class="nodeSub">comprehensive · all PIDs</text>
+  <line x1="290" y1="432" x2="670" y2="432" stroke="#7aaad4" stroke-opacity="0.25"/>
+  <!-- Polling badges -->
+  <rect x="330" y="438" width="130" height="18" rx="4" fill="#1a3049" stroke="#7aaad4" stroke-opacity="0.45"/>
+  <text x="395" y="450" text-anchor="middle" class="nodeSub">every N seconds</text>
+  <rect x="480" y="438" width="178" height="18" rx="4" fill="#1a3049" stroke="#7aaad4" stroke-opacity="0.45"/>
+  <text x="569" y="450" text-anchor="middle" class="nodeSub">CGSEventIsAppUnresponsive</text>
+
+  <!-- Arrow: Layer 2 -> FP Filter -->
+  <path d="M480 460 L480 518" stroke="#7aaad4" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#arrBlue)"/>
+  <text x="492" y="485" class="arrLabelBlue">diff against monitorState</text>
+  <text x="492" y="501" class="arrLabelBlue">emits MonitorEvent (deduped)</text>
+
+  <!-- ═══════ False-Positive Filter ═══════ -->
+  <rect x="250" y="520" width="460" height="70" rx="14" fill="url(#warnGrad)" stroke="#c8881a" stroke-opacity="0.65" stroke-width="1.5"/>
+  <text x="480" y="550" text-anchor="middle" class="nodeTitle" fill="#e8c08a">False-Positive Filter</text>
+  <text x="480" y="570" text-anchor="middle" class="badgeTxt">non-regular + no windows → suppress</text>
+
+  <!-- Filter annotation (right) -->
+  <rect x="740" y="524" width="180" height="62" rx="8" fill="#11253b" stroke="#c8881a" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="830" y="543" text-anchor="middle" class="annotation">activationPolicy != .regular</text>
+  <text x="830" y="558" text-anchor="middle" class="annotation">&amp;&amp; !processHasWindows(pid)</text>
+  <text x="830" y="573" text-anchor="middle" class="annotation">→ hung = false</text>
+  <path d="M740 555 L712 555" stroke="#c8881a" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrGold)"/>
+
+  <!-- Arrow: FP Filter -> Output -->
+  <path d="M480 590 L480 628" stroke="#e8a020" stroke-width="1.6" marker-end="url(#arrGold)"/>
+
+  <!-- ═══════ Output ═══════ -->
+  <rect x="310" y="630" width="340" height="56" rx="14" fill="url(#greenGrad)" stroke="#4ade80" stroke-opacity="0.6" stroke-width="1.5"/>
+  <text x="480" y="656" text-anchor="middle" class="nodeTitle" fill="#a8e8c0">Output</text>
+  <text x="480" y="672" text-anchor="middle" class="nodeSub" fill="#5ecc90">ANSI table · JSON · NDJSON</text>
+
+  <!-- ═══════ Legend ═══════ -->
+  <line x1="180" y1="702" x2="212" y2="702" stroke="#e8a020" stroke-width="2"/>
+  <text x="220" y="706" class="legend">data flow / push events</text>
+
+  <line x1="420" y1="702" x2="452" y2="702" stroke="#7aaad4" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="460" y="706" class="legend">state updates / feedback</text>
+
+  <text x="680" y="706" class="legend" fill="#c8881a">⊙ false-positive mitigation point</text>
+</svg>

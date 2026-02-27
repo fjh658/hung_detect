@@ -11,7 +11,7 @@
 - 支持通用二进制构建（`arm64` + `x86_64`）。
 - 最低系统版本由 `Package.swift` 定义（`macOS 12+`）。
 - 支持终端表格输出和 JSON 输出。
-- 输出进程元信息：PID、父 PID、用户、Bundle ID、架构、沙盒状态、防睡眠状态、运行时长、可执行文件路径。
+- 输出进程元信息：PID、父 PID、用户、Bundle ID、架构、代码签名证书、沙盒状态、防睡眠状态、运行时长、可执行文件路径。
 - 可选显示 SHA-256。
 - **监控模式**：持续 push+poll 监听 hung 状态变化（NDJSON 事件流）。
 - **内置诊断**：自动对 hung 进程执行 `sample` 和 `spindump`。
@@ -104,7 +104,38 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 
 ### JSON 输出
 
-![hung_detect json output](images/hung_detect_json.png)
+```bash
+❯ hung_detect --json
+```
+```json
+{
+  "version": "0.5.1",
+  "build_time": "2026-02-28T00:22:49.853+08:00",
+  "scan_time": "2026-02-28T00:23:00.027+08:00",
+  "summary": { "total": 1, "not_responding": 1, "ok": 0 },
+  "processes": [
+    {
+      "pid": 913,
+      "ppid": 1,
+      "user": "john",
+      "name": "AlDente",
+      "bundle_id": "com.apphousekitchen.aldente-pro-setapp",
+      "executable_path": "/Applications/Setapp/AlDente Pro.app/Contents/MacOS/AlDente",
+      "sha256": "28fc0725fd3767f48f2a3f2c33af662de866d8306ade656e7d3fa5c59783dedc",
+      "arch": "arm64",
+      "codesign_authority": "Developer ID Application: Apphousekitchen UG (haftungsbeschrankt) (F2GU6N2K5E)",
+      "sandboxed": false,
+      "preventing_sleep": false,
+      "elapsed_seconds": 29033,
+      "responding": false
+    }
+  ]
+}
+```
+
+### 监控架构
+
+![Monitor mode architecture](images/monitor-architecture.svg)
 
 ## ⚙️ CLI 参数
 
@@ -165,6 +196,7 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 | 维度 | 活动监视器 | hung_detect | 状态 |
 |---|---|---|---|
 | hung 判定信号来源 | Window Server 私有信号 | 同样使用 CGS 信号链路（`CGSEventIsAppUnresponsive`） | 对齐 |
+| 误报过滤 | 私有 SkyLight entitlement 保证 API 结果准确 | 窗口交叉验证：非 regular 且无窗口的进程抑制误报 | 对齐（机制不同，结果一致） |
 | 监控机制 | push + poll | push + poll，push 不可用时自动退化为 poll-only | 对齐 |
 | 启动期 push 窗口处理 | 通过内部刷新快速收敛 | unknown PID push 会触发一次即时 rescan | 对齐 |
 | push 回调作用范围 | 前台应用类型 | push 更新仅应用于前台应用类型 | 对齐 |
@@ -177,7 +209,8 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 
 ## 🧵 并发模型
 
-- `MonitorEngine` 状态统一收敛到主队列（`dispatchMain` + 回调切主线程）管理。
+- `MonitorEngine` 状态统一收敛到主队列（`CFRunLoopRun` + 回调切主线程）管理。
+- 监控事件循环使用 `CFRunLoopRun()`（而非 `dispatchMain()`），确保 `NSWorkspace.shared.runningApplications` 通过 NSRunLoop 通知与新启动/终止的应用保持同步。
 - push 回调（`CGSRegisterNotifyProc`）与定时轮询都写入同一份主线程状态，避免竞态。
 - push 事件出现未知/过早 PID 时，会立即安排一次对账重扫，不等下一次轮询。
 - 诊断任务在独立并发队列执行；同一 PID 的去重由小粒度锁保护。
@@ -185,8 +218,19 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 
 ## ⚡ 性能说明
 
-- SHA-256 改为延迟计算，只对最终输出的行计算。
+- SHA-256 和代码签名信息均延迟计算，只对最终输出的行计算。
+- 代码签名采用两阶段查询：先快速检查签名标志位识别 adhoc/unsigned，只有真正有证书的才做昂贵的 `SecCodeCopySigningInformation`（`kSecCSSigningInformation`）调用。
+- SHA-256 和签名结果均按可执行路径缓存（NSCache），同一次运行中共享同一二进制的进程不重复查询（如 326 个进程 → 152 个唯一路径 → 174 次缓存命中）。
 - `--json --all` 会比默认模式慢，因为需要输出并哈希所有匹配进程。
+
+性能实测（326 进程，152 唯一路径）：
+
+| 模式 | 耗时 |
+|---|---|
+| 默认（仅 hung） | ~0.1s |
+| `--name <APP>` | ~0.09s |
+| `--all` 有缓存 | ~1.2s |
+| `--all` 无缓存 | ~1.4s (+12%) |
 
 ## 🩺 诊断
 

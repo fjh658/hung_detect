@@ -9,6 +9,7 @@ import AppKit
 import Darwin
 import CryptoKit
 import IOKit.pwr_mgt
+import Security
 import CGSInternalShim
 
 // MARK: - Private API Loading
@@ -295,6 +296,13 @@ private final class ProcessInspector {
         return String(cString: buf)
     }
 
+    static func windowOwnerPIDs() -> Set<pid_t> {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        return Set(list.compactMap { $0[kCGWindowOwnerPID as String] as? pid_t })
+    }
+
     static func userName(uid: uid_t) -> String {
         if let pw = getpwuid(uid) { return String(cString: pw.pointee.pw_name) }
         return "\(uid)"
@@ -339,6 +347,59 @@ private final class ProcessInspector {
         sha256Cache.setObject(hex as NSString, forKey: path as NSString)
         return hex
     }
+
+    private static let codesignCache = NSCache<NSString, NSString>()
+
+    static func codeSigningAuthority(path: String) -> String {
+        guard path != "-" else { return "-" }
+        if let cached = codesignCache.object(forKey: path as NSString) {
+            return cached as String
+        }
+        let url = URL(fileURLWithPath: path) as CFURL
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess,
+              let code = staticCode else {
+            codesignCache.setObject("unsigned" as NSString, forKey: path as NSString)
+            return "unsigned"
+        }
+        // First pass: basic info (fast) to check adhoc flag
+        var basicInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(), &basicInfo) == errSecSuccess,
+              let basicDict = basicInfo as? [String: Any] else {
+            codesignCache.setObject("unsigned" as NSString, forKey: path as NSString)
+            return "unsigned"
+        }
+        let flags = basicDict[kSecCodeInfoFlags as String] as? UInt32 ?? 0
+        // kSecCodeSignatureAdhoc == 0x0002
+        if (flags & 0x0002) != 0 {
+            codesignCache.setObject("adhoc" as NSString, forKey: path as NSString)
+            return "adhoc"
+        }
+        // Second pass: full signing info (slower) only for properly signed binaries
+        var fullInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &fullInfo) == errSecSuccess,
+              let fullDict = fullInfo as? [String: Any],
+              let certs = fullDict[kSecCodeInfoCertificates as String] as? [SecCertificate],
+              let leafCert = certs.first else {
+            codesignCache.setObject("unsigned" as NSString, forKey: path as NSString)
+            return "unsigned"
+        }
+        var commonName: CFString?
+        SecCertificateCopyCommonName(leafCert, &commonName)
+        let result = (commonName as String?) ?? "-"
+        codesignCache.setObject(result as NSString, forKey: path as NSString)
+        return result
+    }
+
+    static func addCodeSign(_ entries: [ProcEntry], onlyHung: Bool = false) -> [ProcEntry] {
+        entries.map { entry in
+            if onlyHung && entry.responding { return entry }
+            if entry.path == "-" { return entry }
+            var out = entry
+            out.codesign = codeSigningAuthority(path: entry.path)
+            return out
+        }
+    }
 }
 
 // MARK: - Data Types
@@ -356,7 +417,29 @@ struct ProcEntry {
     let preventingSleep: Bool
     let uptime: Double
     let responding: Bool
+    var codesign: String
 }
+
+private let isoFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSxxx"
+    return f
+}()
+
+private let timeOnlyFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSxxx"
+    return f
+}()
+
+private let fileTimestampFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyyMMdd_HHmmssSSS"
+    return f
+}()
 
 // MARK: - Monitor Types
 
@@ -611,21 +694,7 @@ final class CLI {
 // MARK: - ANSI Colors
 
 final class C {
-    private static let stateLock = NSLock()
-    private static var _enabled = true
-    static var enabled: Bool {
-        get {
-            stateLock.lock()
-            let value = _enabled
-            stateLock.unlock()
-            return value
-        }
-        set {
-            stateLock.lock()
-            _enabled = newValue
-            stateLock.unlock()
-        }
-    }
+    static var enabled = true
     static var reset:   String { enabled ? "\u{1b}[0m"  : "" }
     static var bold:    String { enabled ? "\u{1b}[1m"  : "" }
     static var red:     String { enabled ? "\u{1b}[31m" : "" }
@@ -718,110 +787,113 @@ final class TextLayout {
 
 final class TableRenderer {
     static func renderProcessTable(_ entries: [ProcEntry], showAll: Bool, showSHA: Bool) {
-    let rows = showAll ? entries : entries.filter { !$0.responding }
+        let rows = showAll ? entries : entries.filter { !$0.responding }
 
-    // Summary counts
-    let hungN = entries.filter { !$0.responding }.count
-    let okN = entries.count - hungN
+        // Summary counts
+        let hungN = entries.filter { !$0.responding }.count
+        let okN = entries.count - hungN
 
-    if rows.isEmpty {
-        print("\(C.green)All \(okN) processes responding.\(C.reset)")
-        return
-    }
+        let scanTime = isoFormatter.string(from: Date())
 
-    // Column defs: header, rightAlign, flexible (shares remaining width), truncateLeft, getter
-    var colDefs: [(hdr: String, rAlign: Bool, flex: Bool, tLeft: Bool, get: (ProcEntry) -> String)] = [
-        ("ST",     false, false, false, { $0.responding ? "OK" : "HUNG" }),
-        ("PID",    true,  false, false, { "\($0.pid)" }),
-        ("PPID",   true,  false, false, { "\($0.ppid)" }),
-        ("USER",   false, false, false, { $0.user }),
-        ("NAME",   false, true,  false, { $0.name }),
-        ("BUNDLE ID", false, true, false, { $0.bundleID }),
-        ("ARCH",   false, false, false, { $0.arch }),
-        ("SAND",   false, false, false, { $0.sandboxed ? "Yes" : "No" }),
-        ("SLEEP",  false, false, false, { $0.preventingSleep ? "Yes" : "No" }),
-        ("UPTIME", true,  false, false, { TextLayout.formatUptime($0.uptime) }),
-        ("PATH",   false, true,  true,  { $0.path }),
-    ]
-    if showSHA {
-        // Insert SHA before PATH
-        colDefs.insert(("SHA", false, false, false, { $0.sha256 == "-" ? "-" : String($0.sha256.prefix(8)) }), at: colDefs.count - 1)
-    }
-    let n = colDefs.count
-
-    // Compute raw cell values
-    var rawCells: [[String]] = rows.map { row in colDefs.map { $0.get(row) } }
-
-    // Natural widths (unconstrained, by display width)
-    var natural = colDefs.map { TextLayout.displayWidth($0.hdr) }
-    for cells in rawCells {
-        for (i, s) in cells.enumerated() { natural[i] = max(natural[i], TextLayout.displayWidth(s)) }
-    }
-
-    // Fit to terminal
-    let tw = TextLayout.termWidth()
-    let overhead = 3 * n + 1  // │ + 2 padding per cell + outer borders
-    var widths = natural
-
-    let totalNatural = natural.reduce(0, +) + overhead
-    if totalNatural > tw {
-        let flexIdx = colDefs.enumerated().compactMap { $0.element.flex ? $0.offset : nil }
-        let fixedSum = colDefs.enumerated().filter { !$0.element.flex }.map { natural[$0.offset] }.reduce(0, +)
-        let avail = max(tw - overhead - fixedSum, flexIdx.count * 4) // min 4 chars each
-        let flexNatSum = flexIdx.map { natural[$0] }.reduce(0, +)
-
-        for i in flexIdx {
-            let share = flexNatSum > 0 ? Double(natural[i]) / Double(flexNatSum) : 1.0 / Double(flexIdx.count)
-            widths[i] = max(colDefs[i].hdr.count, min(natural[i], Int(Double(avail) * share)))
+        if rows.isEmpty {
+            print("\(C.dim)hung_detect \(toolVersion) (built \(buildTime)) scanned \(scanTime)\(C.reset)")
+            print("\(C.green)All \(okN) processes responding.\(C.reset)")
+            return
         }
-        // Trim excess
-        var flexUsed = flexIdx.map { widths[$0] }.reduce(0, +)
-        while flexUsed > avail, let w = flexIdx.max(by: { widths[$0] < widths[$1] }), widths[w] > 3 {
-            widths[w] -= 1; flexUsed -= 1
+
+        // Column defs: header, rightAlign, flexible (shares remaining width), truncateLeft, getter
+        var colDefs: [(hdr: String, rAlign: Bool, flex: Bool, tLeft: Bool, get: (ProcEntry) -> String)] = [
+            ("ST",     false, false, false, { $0.responding ? "OK" : "HUNG" }),
+            ("PID",    true,  false, false, { "\($0.pid)" }),
+            ("PPID",   true,  false, false, { "\($0.ppid)" }),
+            ("USER",   false, false, false, { $0.user }),
+            ("NAME",   false, true,  false, { $0.name }),
+            ("BUNDLE ID", false, true, false, { $0.bundleID }),
+            ("ARCH",   false, false, false, { $0.arch }),
+            ("SIGN",   false, true,  false, { $0.codesign }),
+            ("SAND",   false, false, false, { $0.sandboxed ? "Yes" : "No" }),
+            ("SLEEP",  false, false, false, { $0.preventingSleep ? "Yes" : "No" }),
+            ("UPTIME", true,  false, false, { TextLayout.formatUptime($0.uptime) }),
+            ("PATH",   false, true,  true,  { $0.path }),
+        ]
+        if showSHA {
+            // Insert SHA before PATH
+            colDefs.insert(("SHA", false, false, false, { $0.sha256 == "-" ? "-" : String($0.sha256.prefix(8)) }), at: colDefs.count - 1)
         }
-    }
+        let n = colDefs.count
 
-    // Apply truncation to raw cells
-    for r in 0..<rawCells.count {
-        for (i, col) in colDefs.enumerated() where TextLayout.displayWidth(rawCells[r][i]) > widths[i] {
-            rawCells[r][i] = col.tLeft ? TextLayout.truncL(rawCells[r][i], widths[i]) : TextLayout.truncR(rawCells[r][i], widths[i])
+        // Compute raw cell values
+        var rawCells: [[String]] = rows.map { row in colDefs.map { $0.get(row) } }
+
+        // Natural widths (unconstrained, by display width)
+        var natural = colDefs.map { TextLayout.displayWidth($0.hdr) }
+        for cells in rawCells {
+            for (i, s) in cells.enumerated() { natural[i] = max(natural[i], TextLayout.displayWidth(s)) }
         }
-    }
 
-    // Box-drawing
-    func hLine(_ l: String, _ m: String, _ r: String) -> String {
-        l + widths.map { String(repeating: "\u{2500}", count: $0 + 2) }.joined(separator: m) + r
-    }
+        // Fit to terminal
+        let tw = TextLayout.termWidth()
+        let overhead = 3 * n + 1  // │ + 2 padding per cell + outer borders
+        var widths = natural
 
-    print(hLine("\u{250c}", "\u{252c}", "\u{2510}"))
+        let totalNatural = natural.reduce(0, +) + overhead
+        if totalNatural > tw {
+            let flexIdx = colDefs.enumerated().compactMap { $0.element.flex ? $0.offset : nil }
+            let fixedSum = colDefs.enumerated().filter { !$0.element.flex }.map { natural[$0.offset] }.reduce(0, +)
+            let avail = max(tw - overhead - fixedSum, flexIdx.count * 4) // min 4 chars each
+            let flexNatSum = flexIdx.map { natural[$0] }.reduce(0, +)
 
-    let hdr = colDefs.enumerated().map { (i, c) in " \(TextLayout.pad(c.hdr, widths[i], right: c.rAlign)) " }
-    print("\(C.bold)\u{2502}" + hdr.joined(separator: "\u{2502}") + "\u{2502}\(C.reset)")
+            for i in flexIdx {
+                let share = flexNatSum > 0 ? Double(natural[i]) / Double(flexNatSum) : 1.0 / Double(flexIdx.count)
+                widths[i] = max(colDefs[i].hdr.count, min(natural[i], Int(Double(avail) * share)))
+            }
+            // Trim excess
+            var flexUsed = flexIdx.map { widths[$0] }.reduce(0, +)
+            while flexUsed > avail, let w = flexIdx.max(by: { widths[$0] < widths[$1] }), widths[w] > 3 {
+                widths[w] -= 1; flexUsed -= 1
+            }
+        }
 
-    print(hLine("\u{251c}", "\u{253c}", "\u{2524}"))
+        // Apply truncation to raw cells
+        for r in 0..<rawCells.count {
+            for (i, col) in colDefs.enumerated() where TextLayout.displayWidth(rawCells[r][i]) > widths[i] {
+                rawCells[r][i] = col.tLeft ? TextLayout.truncL(rawCells[r][i], widths[i]) : TextLayout.truncR(rawCells[r][i], widths[i])
+            }
+        }
 
-    for (r, row) in rows.enumerated() {
-        let cells = rawCells[r].enumerated().map { (i, s) in " \(TextLayout.pad(s, widths[i], right: colDefs[i].rAlign)) " }
-        let color = row.responding ? "" : C.red
-        print("\(color)\u{2502}" + cells.joined(separator: "\u{2502}") + "\u{2502}\(C.reset)")
-    }
+        // Box-drawing
+        func hLine(_ l: String, _ m: String, _ r: String) -> String {
+            l + widths.map { String(repeating: "\u{2500}", count: $0 + 2) }.joined(separator: m) + r
+        }
 
-    print(hLine("\u{2514}", "\u{2534}", "\u{2518}"))
+        print("\(C.dim)hung_detect \(toolVersion) (built \(buildTime)) scanned \(scanTime)\(C.reset)")
+        print(hLine("\u{250c}", "\u{252c}", "\u{2510}"))
 
-    if hungN > 0 {
-        print("\(C.boldRed)\(hungN) not responding\(C.reset), \(okN) ok  (total \(entries.count))")
-    } else {
-        print("\(C.green)\(okN) ok\(C.reset)  (total \(entries.count))")
-    }
-    var legend = "ST=Status  SAND=Sandboxed  SLEEP=Preventing Sleep"
-    if showSHA { legend += "  SHA=SHA-256 first 8 chars" }
-    print("\(C.dim)\(legend)\(C.reset)")
+        let hdr = colDefs.enumerated().map { (i, c) in " \(TextLayout.pad(c.hdr, widths[i], right: c.rAlign)) " }
+        print("\(C.bold)\u{2502}" + hdr.joined(separator: "\u{2502}") + "\u{2502}\(C.reset)")
+
+        print(hLine("\u{251c}", "\u{253c}", "\u{2524}"))
+
+        for (r, row) in rows.enumerated() {
+            let cells = rawCells[r].enumerated().map { (i, s) in " \(TextLayout.pad(s, widths[i], right: colDefs[i].rAlign)) " }
+            let color = row.responding ? "" : C.red
+            print("\(color)\u{2502}" + cells.joined(separator: "\u{2502}") + "\u{2502}\(C.reset)")
+        }
+
+        print(hLine("\u{2514}", "\u{2534}", "\u{2518}"))
+
+        if hungN > 0 {
+            print("\(C.boldRed)\(hungN) not responding\(C.reset), \(okN) ok  (total \(entries.count))")
+        } else {
+            print("\(C.green)\(okN) ok\(C.reset)  (total \(entries.count))")
+        }
+        var legend = "ST=Status  SAND=Sandboxed  SLEEP=Preventing Sleep"
+        if showSHA { legend += "  SHA=SHA-256 first 8 chars" }
+        print("\(C.dim)\(legend)\(C.reset)")
     }
 
     static func renderDiagnosis(_ results: [DiagToolResult]) {
-        let tf = DateFormatter()
-        tf.dateFormat = "HH:mm:ss"
-        let ts = tf.string(from: Date())
+        let ts = timeOnlyFormatter.string(from: Date())
 
         var grouped: [(pid: pid_t, name: String, items: [DiagToolResult])] = []
         var seen: [pid_t: Int] = [:]
@@ -851,9 +923,7 @@ final class TableRenderer {
     }
 
     static func renderMonitorEvent(_ event: MonitorEvent) {
-        let tf = DateFormatter()
-        tf.dateFormat = "HH:mm:ss"
-        let ts = tf.string(from: event.timestamp)
+        let ts = timeOnlyFormatter.string(from: event.timestamp)
 
         let label: String
         let color: String
@@ -870,6 +940,7 @@ final class TableRenderer {
     static func renderMonitorMeta(type: String, interval: Double, pushActive: Bool, hungCount: Int) {
         if type == "monitor_start" {
             let pushStr = pushActive ? "push+poll" : "poll-only"
+            print("\(C.dim)hung_detect \(toolVersion) (built \(buildTime)) started \(isoFormatter.string(from: Date()))\(C.reset)")
             print("\(C.bold)Monitor mode\(C.reset) (\(pushStr), interval \(interval)s) — press Ctrl+C to stop")
         } else {
             print("\n\(C.dim)Monitor stopped. \(hungCount) hung event(s) detected.\(C.reset)")
@@ -882,18 +953,29 @@ final class TableRenderer {
 
 final class JSONRenderer {
     static func escJSON(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-         .replacingOccurrences(of: "\"", with: "\\\"")
-         .replacingOccurrences(of: "\n", with: "\\n")
-         .replacingOccurrences(of: "\t", with: "\\t")
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s.unicodeScalars {
+            switch ch {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\t": out += "\\t"
+            case "\r": out += "\\r"
+            default:
+                if ch.value < 0x20 {
+                    out += String(format: "\\u%04x", ch.value)
+                } else {
+                    out.append(Character(ch))
+                }
+            }
+        }
+        return out
     }
 
     static func renderProcessJSON(_ entries: [ProcEntry], diagnosis: [DiagToolResult] = []) {
     let hungN = entries.filter { !$0.responding }.count
     let okN = entries.count - hungN
-
-    let fmt = ISO8601DateFormatter()
-    fmt.formatOptions = [.withInternetDateTime]
 
     var procs: [String] = []
     for e in entries {
@@ -907,6 +989,7 @@ final class JSONRenderer {
               "executable_path": "\(escJSON(e.path))",
               "sha256": \(e.sha256 == "-" ? "null" : "\"\(e.sha256)\""),
               "arch": "\(e.arch)",
+              "codesign_authority": \(e.codesign == "-" ? "null" : "\"\(escJSON(e.codesign))\""),
               "sandboxed": \(e.sandboxed),
               "preventing_sleep": \(e.preventingSleep),
               "elapsed_seconds": \(Int(e.uptime)),
@@ -928,7 +1011,9 @@ final class JSONRenderer {
 
     print("""
     {
-      "scan_time": "\(fmt.string(from: Date()))",
+      "version": "\(toolVersion)",
+      "build_time": "\(buildTime)",
+      "scan_time": "\(isoFormatter.string(from: Date()))",
       "summary": { "total": \(entries.count), "not_responding": \(hungN), "ok": \(okN) },
       "processes": [
     \(procs.joined(separator: ",\n"))
@@ -938,9 +1023,7 @@ final class JSONRenderer {
     }
 
     static func renderDiagnosis(_ results: [DiagToolResult]) {
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime]
-        let ts = fmt.string(from: Date())
+        let ts = isoFormatter.string(from: Date())
 
         for r in results {
             let path = r.outputPath.map { "\"\(escJSON($0))\"" } ?? "null"
@@ -952,18 +1035,18 @@ final class JSONRenderer {
         fflush(stdout)
     }
 
-    static func renderMonitorEvent(_ event: MonitorEvent, formatter: ISO8601DateFormatter) {
-        let ts = formatter.string(from: event.timestamp)
+    static func renderMonitorEvent(_ event: MonitorEvent) {
+        let ts = isoFormatter.string(from: event.timestamp)
         print("""
         {"timestamp":"\(ts)","event":"\(event.eventType.rawValue)","pid":\(event.pid),"name":"\(escJSON(event.name))","bundle_id":\(event.bundleID == "-" ? "null" : "\"\(escJSON(event.bundleID))\"")}
         """.trimmingCharacters(in: .whitespaces))
         fflush(stdout)
     }
 
-    static func renderMonitorMeta(type: String, interval: Double, pushAvailable: Bool, formatter: ISO8601DateFormatter) {
-        let ts = formatter.string(from: Date())
+    static func renderMonitorMeta(type: String, interval: Double, pushAvailable: Bool) {
+        let ts = isoFormatter.string(from: Date())
         print("""
-        {"timestamp":"\(ts)","event":"\(type)","interval":\(interval),"push_available":\(pushAvailable)}
+        {"timestamp":"\(ts)","event":"\(type)","version":"\(toolVersion)","build_time":"\(buildTime)","interval":\(interval),"push_available":\(pushAvailable)}
         """.trimmingCharacters(in: .whitespaces))
         fflush(stdout)
     }
@@ -997,17 +1080,28 @@ private final class DiagnosisRunner {
         self.outputHandler = outputHandler
     }
 
-    func runSingleShot(hungProcesses: [(pid: pid_t, name: String)]) -> [DiagToolResult] {
-        guard let outdir = resolveDiagOutdir() else {
-            return diagnosisOutdirErrorResults(hungProcesses: hungProcesses,
-                                               reason: "failed to create output directory")
+    private final class DiagResultCollector {
+        private var results: [DiagToolResult] = []
+        private let lock = NSLock()
+        func append(_ r: DiagToolResult) {
+            lock.lock(); results.append(r); lock.unlock()
         }
-        let timestamp = Self.diagnosisTimestamp()
-        var results: [DiagToolResult] = []
-        let resultsLock = NSLock()
+        func collect() -> [DiagToolResult] {
+            lock.lock(); defer { lock.unlock() }; return results
+        }
+    }
+
+    /// Dispatch all diagnosis tools for the given processes.
+    /// Callers wait on the returned group, then call collector.collect().
+    private func dispatchDiagnosis(
+        processes: [(pid: pid_t, name: String)],
+        outdir: String,
+        timestamp: String
+    ) -> (collector: DiagResultCollector, group: DispatchGroup) {
+        let collector = DiagResultCollector()
         let group = DispatchGroup()
 
-        for proc in hungProcesses {
+        for proc in processes {
             if opts.sample {
                 group.enter()
                 diagnosisQueue.async {
@@ -1016,19 +1110,22 @@ private final class DiagnosisRunner {
                                            intervalMs: self.opts.sampleIntervalMs,
                                            outdir: outdir,
                                            timestamp: timestamp)
-                    resultsLock.lock(); results.append(r); resultsLock.unlock()
+                    collector.append(r)
                     group.leave()
                 }
             }
             if opts.spindump {
                 group.enter()
                 diagnosisQueue.async {
-                    let r = self.runSpindumpPid(pid: proc.pid, name: proc.name,
-                                                duration: self.opts.spindumpDuration,
-                                                intervalMs: self.opts.spindumpIntervalMs,
-                                                outdir: outdir,
-                                                timestamp: timestamp)
-                    resultsLock.lock(); results.append(r); resultsLock.unlock()
+                    let r = self.runSpindump(pid: proc.pid, name: proc.name,
+                                              tool: "spindump",
+                                              targetArgs: ["\(proc.pid)"],
+                                              duration: self.opts.spindumpDuration,
+                                              intervalMs: self.opts.spindumpIntervalMs,
+                                              extraTimeout: 30,
+                                              outdir: outdir,
+                                              timestamp: timestamp)
+                    collector.append(r)
                     group.leave()
                 }
             }
@@ -1036,18 +1133,33 @@ private final class DiagnosisRunner {
         if opts.full {
             group.enter()
             diagnosisQueue.async {
-                let r = self.runSpindumpSystem(duration: self.opts.spindumpSystemDuration,
-                                               intervalMs: self.opts.spindumpSystemIntervalMs,
-                                               outdir: outdir,
-                                               timestamp: timestamp)
-                resultsLock.lock(); results.append(r); resultsLock.unlock()
+                let r = self.runSpindump(pid: 0, name: "system",
+                                              tool: "spindump-system",
+                                              targetArgs: ["-noTarget"],
+                                              duration: self.opts.spindumpSystemDuration,
+                                              intervalMs: self.opts.spindumpSystemIntervalMs,
+                                              extraTimeout: 60,
+                                              outdir: outdir,
+                                              timestamp: timestamp)
+                collector.append(r)
                 group.leave()
             }
         }
 
+        return (collector, group)
+    }
+
+    func runSingleShot(hungProcesses: [(pid: pid_t, name: String)]) -> [DiagToolResult] {
+        guard let outdir = resolveDiagOutdir() else {
+            return diagnosisOutdirErrorResults(hungProcesses: hungProcesses,
+                                               reason: "failed to create output directory")
+        }
+        let timestamp = Self.diagnosisTimestamp()
+        let (collector, group) = dispatchDiagnosis(
+            processes: hungProcesses, outdir: outdir, timestamp: timestamp)
         group.wait()
         fixOwnership(dir: outdir)
-        return results
+        return collector.collect()
     }
 
     func triggerAsync(hungProcesses: [(pid: pid_t, name: String)]) {
@@ -1071,52 +1183,13 @@ private final class DiagnosisRunner {
             return
         }
         let timestamp = Self.diagnosisTimestamp()
-
-        var results: [DiagToolResult] = []
-        let resultsLock = NSLock()
-        let group = DispatchGroup()
-
-        for proc in newProcs {
-            if opts.sample {
-                group.enter()
-                diagnosisQueue.async {
-                    let r = self.runSample(pid: proc.pid, name: proc.name,
-                                           duration: self.opts.sampleDuration,
-                                           intervalMs: self.opts.sampleIntervalMs,
-                                           outdir: outdir,
-                                           timestamp: timestamp)
-                    resultsLock.lock(); results.append(r); resultsLock.unlock()
-                    group.leave()
-                }
-            }
-            if opts.spindump {
-                group.enter()
-                diagnosisQueue.async {
-                    let r = self.runSpindumpPid(pid: proc.pid, name: proc.name,
-                                                duration: self.opts.spindumpDuration,
-                                                intervalMs: self.opts.spindumpIntervalMs,
-                                                outdir: outdir,
-                                                timestamp: timestamp)
-                    resultsLock.lock(); results.append(r); resultsLock.unlock()
-                    group.leave()
-                }
-            }
-        }
-        if opts.full {
-            group.enter()
-            diagnosisQueue.async {
-                let r = self.runSpindumpSystem(duration: self.opts.spindumpSystemDuration,
-                                               intervalMs: self.opts.spindumpSystemIntervalMs,
-                                               outdir: outdir,
-                                               timestamp: timestamp)
-                resultsLock.lock(); results.append(r); resultsLock.unlock()
-                group.leave()
-            }
-        }
+        let (collector, group) = dispatchDiagnosis(
+            processes: newProcs, outdir: outdir, timestamp: timestamp)
 
         diagnosisQueue.async {
             group.wait()
             self.fixOwnership(dir: outdir)
+            let results = collector.collect()
             self.diagnosingPIDsLock.lock()
             for p in newProcs { self.diagnosingPIDs.remove(p.pid) }
             self.diagnosingPIDsLock.unlock()
@@ -1208,72 +1281,40 @@ private final class DiagnosisRunner {
                               error: ok ? nil : (errStr.isEmpty ? "sample failed" : errStr))
     }
 
-    private func runSpindumpPid(pid: pid_t, name: String, duration: Int, intervalMs: Int,
-                                outdir: String, timestamp: String) -> DiagToolResult {
-        let outfile = "\(outdir)/\(timestamp)_\(safeName(name))_\(pid).spindump.txt"
+    private func runSpindump(pid: pid_t, name: String, tool: String,
+                              targetArgs: [String], duration: Int, intervalMs: Int,
+                              extraTimeout: Int, outdir: String, timestamp: String) -> DiagToolResult {
+        let suffix = pid == 0 ? "system.spindump.txt" : "\(safeName(name))_\(pid).spindump.txt"
+        let outfile = "\(outdir)/\(timestamp)_\(suffix)"
         let start = Date()
 
         let isRoot = getuid() == 0
+        let spindumpArgs = targetArgs + ["\(duration)", "\(intervalMs)", "-file", outfile]
         let exe: String
         let args: [String]
         if isRoot {
             exe = "/usr/sbin/spindump"
-            args = ["\(pid)", "\(duration)", "\(intervalMs)", "-file", outfile]
+            args = spindumpArgs
         } else {
             exe = "/usr/bin/sudo"
-            args = ["-n", "/usr/sbin/spindump", "\(pid)", "\(duration)", "\(intervalMs)", "-file", outfile]
+            args = ["-n", "/usr/sbin/spindump"] + spindumpArgs
         }
 
         let (ok, errStr) = Self.runDiagCommand(executablePath: exe,
                                                arguments: args,
-                                               timeout: TimeInterval(duration + 30))
+                                               timeout: TimeInterval(duration + extraTimeout))
         fixOwnershipPath(outfile)
         let elapsed = Date().timeIntervalSince(start)
 
-        var finalErr: String? = nil
+        var finalErr: String?
         if !ok {
             if errStr.lowercased().contains("password") || errStr.lowercased().contains("sudo") {
-                finalErr = "spindump requires root privileges"
+                finalErr = "\(tool) requires root privileges"
             } else {
-                finalErr = errStr.isEmpty ? "spindump failed" : errStr
+                finalErr = errStr.isEmpty ? "\(tool) failed" : errStr
             }
         }
-        return DiagToolResult(pid: pid, name: name, tool: "spindump",
-                              outputPath: ok ? outfile : nil,
-                              elapsed: elapsed, error: finalErr)
-    }
-
-    private func runSpindumpSystem(duration: Int, intervalMs: Int, outdir: String,
-                                   timestamp: String) -> DiagToolResult {
-        let outfile = "\(outdir)/\(timestamp)_system.spindump.txt"
-        let start = Date()
-
-        let isRoot = getuid() == 0
-        let exe: String
-        let args: [String]
-        if isRoot {
-            exe = "/usr/sbin/spindump"
-            args = ["-noTarget", "\(duration)", "\(intervalMs)", "-file", outfile]
-        } else {
-            exe = "/usr/bin/sudo"
-            args = ["-n", "/usr/sbin/spindump", "-noTarget", "\(duration)", "\(intervalMs)", "-file", outfile]
-        }
-
-        let (ok, errStr) = Self.runDiagCommand(executablePath: exe,
-                                               arguments: args,
-                                               timeout: TimeInterval(duration + 60))
-        fixOwnershipPath(outfile)
-        let elapsed = Date().timeIntervalSince(start)
-
-        var finalErr: String? = nil
-        if !ok {
-            if errStr.lowercased().contains("password") || errStr.lowercased().contains("sudo") {
-                finalErr = "system spindump requires root privileges"
-            } else {
-                finalErr = errStr.isEmpty ? "system spindump failed" : errStr
-            }
-        }
-        return DiagToolResult(pid: 0, name: "system", tool: "spindump-system",
+        return DiagToolResult(pid: pid, name: name, tool: tool,
                               outputPath: ok ? outfile : nil,
                               elapsed: elapsed, error: finalErr)
     }
@@ -1290,10 +1331,7 @@ private final class DiagnosisRunner {
     }
 
     private static func diagnosisTimestamp(_ date: Date = Date()) -> String {
-        let df = DateFormatter()
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.dateFormat = "yyyyMMdd_HHmmss"
-        return df.string(from: date)
+        fileTimestampFormatter.string(from: date)
     }
 
     static func runDiagCommand(executablePath: String, arguments: [String],
@@ -1373,8 +1411,12 @@ final class MonitorEngine {
                     }
                 }
             } else {
-                events.append(MonitorEvent(timestamp: now, eventType: .processExited,
-                                           pid: pid, name: prev.name, bundleID: prev.bundleID))
+                // Only report EXIT for processes that were hung — normal process
+                // turnover (Finder extensions, helpers, etc.) is noise.
+                if !prev.responding {
+                    events.append(MonitorEvent(timestamp: now, eventType: .processExited,
+                                               pid: pid, name: prev.name, bundleID: prev.bundleID))
+                }
             }
         }
 
@@ -1419,11 +1461,6 @@ final class MonitorEngine {
     private let bridge: CGSBridge
     private let diagnosisRunner: DiagnosisRunner?
     private var state: [pid_t: ProcessSnapshot] = [:]
-    private let monitorFmt: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
     private var hungCount = 0
     // Coalesce multiple push misses into a single asynchronous reconciliation scan.
     private var pushRescanScheduled = false
@@ -1494,7 +1531,18 @@ final class MonitorEngine {
         pollTimer.resume()
         timer = pollTimer
 
-        dispatchMain()  // never returns; exit via signal handler
+        // Use CFRunLoopRun instead of dispatchMain() so that AppKit/LaunchServices
+        // notifications are fully processed — keeps NSWorkspace.shared.runningApplications
+        // in sync with newly launched (or terminated) apps.
+        // dispatchMain() only processes GCD events; it does NOT pump the NSRunLoop,
+        // so NSWorkspace's cached process list never updates for apps launched after
+        // the monitor started.  CFRunLoopRun processes all common-mode sources
+        // (NSWorkspace, GCD main queue, signal sources) and never returns.
+        withExtendedLifetime(self) {
+            CFRunLoopRun()
+        }
+        // Unreachable — shutdown() calls exit() from the signal handler.
+        return hungCount > 0 ? 1 : 0
     }
 
     private func pollTick() {
@@ -1622,12 +1670,17 @@ final class MonitorEngine {
         }
 
         var result: [pid_t: ProcessSnapshot] = [:]
+        let windowPIDs = ProcessInspector.windowOwnerPIDs()
         for app in apps {
             let pid = app.processIdentifier
             let name = app.localizedName ?? app.bundleIdentifier ?? "PID \(pid)"
             let bid = app.bundleIdentifier ?? "-"
             let fg = isForegroundAppType(app)
-            let hung = bridge.isAppUnresponsive(pid: pid) ?? false
+            var hung = bridge.isAppUnresponsive(pid: pid) ?? false
+            if hung && app.activationPolicy != .regular
+                && !windowPIDs.contains(pid) {
+                hung = false
+            }
             result[pid] = ProcessSnapshot(name: name, bundleID: bid, foregroundApp: fg, responding: !hung)
         }
         return result
@@ -1635,7 +1688,7 @@ final class MonitorEngine {
 
     private func outputMonitorEvent(_ event: MonitorEvent) {
         if opts.json {
-            JSONRenderer.renderMonitorEvent(event, formatter: monitorFmt)
+            JSONRenderer.renderMonitorEvent(event)
         } else {
             TableRenderer.renderMonitorEvent(event)
         }
@@ -1645,8 +1698,7 @@ final class MonitorEngine {
         if opts.json {
             JSONRenderer.renderMonitorMeta(type: type,
                                            interval: opts.interval,
-                                           pushAvailable: pushActive,
-                                           formatter: monitorFmt)
+                                           pushAvailable: pushActive)
         } else {
             TableRenderer.renderMonitorMeta(type: type,
                                             interval: opts.interval,
@@ -1701,7 +1753,7 @@ func main() -> Int32 {
     let opts = CLI.parseArgs()
     if opts.help { CLI.printHelp(); return 0 }
     if opts.version {
-        print("hung_detect \(toolVersion)")
+        print("hung_detect \(toolVersion) (built \(buildTime))")
         return 0
     }
 
@@ -1756,6 +1808,7 @@ func main() -> Int32 {
 
     // Gather info for each process
     var entries: [ProcEntry] = []
+    let windowPIDs = ProcessInspector.windowOwnerPIDs()
     for app in candidates {
         let pid = app.processIdentifier
         let info = ProcessInspector.procInfo(pid: pid)
@@ -1772,12 +1825,22 @@ func main() -> Int32 {
         let user = ProcessInspector.userName(uid: uid)
         let sand = ProcessInspector.isSandboxed(pid: pid)
         let sleep = sleepPIDs.contains(pid)
-        let hung = RuntimeAPI.isAppUnresponsive(pid: pid) ?? false
+        var hung = RuntimeAPI.isAppUnresponsive(pid: pid) ?? false
+        // CGSEventIsAppUnresponsive can false-positive for background/accessory
+        // processes that lack a WindowServer event loop. Activity Monitor avoids
+        // this via a private SkyLight entitlement. We cross-check: if the process
+        // has no windows registered with the WindowServer, it cannot be visibly
+        // hung to the user, so clear the flag.
+        if hung && app.activationPolicy != .regular
+            && !windowPIDs.contains(pid) {
+            hung = false
+        }
 
         entries.append(ProcEntry(
             pid: pid, ppid: ppid, user: user, name: name, bundleID: bid,
             path: path, sha256: hash, arch: arch, sandboxed: sand,
-            preventingSleep: sleep, uptime: uptime, responding: !hung))
+            preventingSleep: sleep, uptime: uptime, responding: !hung,
+            codesign: "-"))
     }
 
     // Sort: not responding first, then by name
@@ -1798,11 +1861,14 @@ func main() -> Int32 {
     // Output: targeted/--all shows everything, default shows only hung
     let showAll = targeted || opts.showAll
     if opts.json {
-        // JSON always includes SHA-256, but compute lazily only for rows that will be emitted.
+        // JSON always includes SHA-256 and codesign, but compute lazily only for rows that will be emitted.
         let base = showAll ? entries : entries.filter { !$0.responding }
-        let output = ProcessInspector.addSHA256(base)
+        var output = ProcessInspector.addCodeSign(base)
+        output = ProcessInspector.addSHA256(output)
         JSONRenderer.renderProcessJSON(output, diagnosis: diagResults)
     } else {
+        // Codesign is always shown; compute only for displayed rows.
+        entries = ProcessInspector.addCodeSign(entries, onlyHung: !showAll)
         if opts.showSHA {
             // Table without --all only prints hung rows, so avoid hashing healthy rows.
             entries = ProcessInspector.addSHA256(entries, onlyHung: !showAll)

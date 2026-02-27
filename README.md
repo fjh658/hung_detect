@@ -11,7 +11,7 @@ It uses the same private Window Server signal used by Activity Monitor (`CGSEven
 - Universal binary build (`arm64` + `x86_64`).
 - macOS deployment target is defined in `Package.swift` (`macOS 12+`).
 - Table output for terminal and JSON output for automation.
-- Includes process metadata: PID, parent PID, user, bundle ID, arch, sandbox state, sleep assertion state, uptime, executable path.
+- Includes process metadata: PID, parent PID, user, bundle ID, arch, code signing authority, sandbox state, sleep assertion state, uptime, executable path.
 - Optional SHA-256 output.
 - **Monitor mode**: continuous push+poll monitoring for hung state changes (NDJSON event stream).
 - **Built-in diagnosis**: automatically run `sample` and `spindump` on hung processes.
@@ -104,7 +104,38 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 
 ### JSON Output
 
-![hung_detect json output](images/hung_detect_json.png)
+```bash
+❯ hung_detect --json
+```
+```json
+{
+  "version": "0.5.1",
+  "build_time": "2026-02-28T00:22:49.853+08:00",
+  "scan_time": "2026-02-28T00:23:00.027+08:00",
+  "summary": { "total": 1, "not_responding": 1, "ok": 0 },
+  "processes": [
+    {
+      "pid": 913,
+      "ppid": 1,
+      "user": "john",
+      "name": "AlDente",
+      "bundle_id": "com.apphousekitchen.aldente-pro-setapp",
+      "executable_path": "/Applications/Setapp/AlDente Pro.app/Contents/MacOS/AlDente",
+      "sha256": "28fc0725fd3767f48f2a3f2c33af662de866d8306ade656e7d3fa5c59783dedc",
+      "arch": "arm64",
+      "codesign_authority": "Developer ID Application: Apphousekitchen UG (haftungsbeschrankt) (F2GU6N2K5E)",
+      "sandboxed": false,
+      "preventing_sleep": false,
+      "elapsed_seconds": 29033,
+      "responding": false
+    }
+  ]
+}
+```
+
+### Monitor Architecture
+
+![Monitor mode architecture](images/monitor-architecture.svg)
 
 ## ⚙️ CLI Options
 
@@ -165,6 +196,7 @@ If all required symbols cannot be resolved, the program exits with code `2`.
 | Dimension | Activity Monitor | hung_detect | Status |
 |---|---|---|---|
 | Hung signal source | Window Server private signal | Same CGS signal path (`CGSEventIsAppUnresponsive`) | Aligned |
+| False-positive mitigation | Private SkyLight entitlement ensures accurate API results | Window-count cross-validation: suppress non-regular apps with no windows | Aligned (different mechanism, same result) |
 | Monitor mechanism | push + poll | push + poll, fallback to poll-only when push unavailable | Aligned |
 | Startup push gap handling | fast convergence via internal state refresh | unknown PID push triggers immediate rescan | Aligned |
 | Push callback scope | foreground app type | push update applies to foreground app type | Aligned |
@@ -177,7 +209,8 @@ If all required symbols cannot be resolved, the program exits with code `2`.
 
 ## 🧵 Concurrency Model
 
-- `MonitorEngine` state is confined to the main queue (`dispatchMain` + main-queue callback handoff).
+- `MonitorEngine` state is confined to the main queue (`CFRunLoopRun` + main-queue callback handoff).
+- The monitor event loop uses `CFRunLoopRun()` (not `dispatchMain()`) so that `NSWorkspace.shared.runningApplications` stays in sync with newly launched/terminated apps via NSRunLoop notifications.
 - Push callbacks (`CGSRegisterNotifyProc`) and polling both update the same main-thread state map to avoid races.
 - Unknown/early push PID events schedule an immediate reconcile rescan instead of waiting for the next polling tick.
 - Diagnosis work runs on a dedicated concurrent queue, with per-PID dedup guarded by a small lock.
@@ -185,8 +218,19 @@ If all required symbols cannot be resolved, the program exits with code `2`.
 
 ## ⚡ Performance Notes
 
-- SHA-256 is computed lazily for rows that are actually emitted.
+- SHA-256 and code signing authority are computed lazily for rows that are actually emitted.
+- Code signing uses a two-pass approach: a fast flag check identifies ad-hoc/unsigned binaries without certificate extraction; only properly signed binaries pay the cost of `SecCodeCopySigningInformation` with `kSecCSSigningInformation`.
+- Both SHA-256 and code signing results are cached by executable path within a single run (NSCache), avoiding redundant lookups when multiple processes share the same binary (e.g. 326 processes → 152 unique paths → 174 cache hits).
 - `--json --all` can be noticeably slower than default mode because it emits and hashes every matched process.
+
+Benchmark (326 processes, 152 unique paths):
+
+| Mode | Wall time |
+|---|---|
+| Default (hung only) | ~0.1s |
+| `--name <APP>` | ~0.09s |
+| `--all` with cache | ~1.2s |
+| `--all` without cache | ~1.4s (+12%) |
 
 ## 🩺 Diagnosis
 

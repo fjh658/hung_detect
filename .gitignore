@@ -8,3 +8,4 @@ hung_diag_*/
 *.tmp
 *.swp
 *.swo
+Sources/hung_detect/BuildInfo.swift

@@ -25,7 +25,7 @@ let package = Package(
             name: "hung_detect",
             dependencies: ["CGSInternalShim"],
             path: "Sources/hung_detect",
-            sources: ["main.swift", "Version.swift"],
+            sources: ["main.swift", "Version.swift", "BuildInfo.swift"],
             linkerSettings: [
                 .linkedFramework("IOKit"),
             ]
