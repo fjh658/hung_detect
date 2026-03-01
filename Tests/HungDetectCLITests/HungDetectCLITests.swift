@@ -10,12 +10,16 @@ private struct CommandResult {
 private func runCommand(
     _ executable: String,
     _ args: [String],
-    cwd: URL? = nil
+    cwd: URL? = nil,
+    env: [String: String] = [:]
 ) throws -> CommandResult {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = args
     process.currentDirectoryURL = cwd
+    if !env.isEmpty {
+        process.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
+    }
 
     let outPipe = Pipe()
     let errPipe = Pipe()
@@ -109,8 +113,16 @@ final class HungDetectCLITests: XCTestCase {
         }
     }
 
-    private func runCLI(_ args: [String]) throws -> CommandResult {
-        try runCommand(Self.binaryPath, args)
+    private func runCLI(_ args: [String], env: [String: String] = [:]) throws -> CommandResult {
+        try runCommand(Self.binaryPath, args, env: env)
+    }
+
+    private func withTemporaryHome<T>(_ body: (URL) throws -> T) throws -> T {
+        let tempHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hung_detect_cli_tests_\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempHome, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempHome) }
+        return try body(tempHome)
     }
 
     private func assertParseError(_ args: [String], message: String) throws {
@@ -136,6 +148,7 @@ final class HungDetectCLITests: XCTestCase {
             "DIAGNOSIS:",
             "EXAMPLES:",
             "--foreground-only",
+            "--type <TYPE>",
             "--sample-duration <SECS>",
             "--sample-interval-ms <MS>",
             "--spindump-duration <SECS>",
@@ -163,6 +176,34 @@ final class HungDetectCLITests: XCTestCase {
         let result = try runCLI(["--does-not-exist"])
         XCTAssertEqual(result.code, 2)
         XCTAssertTrue(result.stderr.contains("Unknown option: --does-not-exist"))
+    }
+
+    func testBenchRemovedFromCLI() throws {
+        let result = try runCLI(["--bench"])
+        XCTAssertEqual(result.code, 2, "Removed --bench should be unknown option")
+        XCTAssertTrue(result.stderr.contains("Unknown option: --bench"))
+    }
+
+    func testTypeValidValues() throws {
+        for type in ["foreground", "uielement", "gui", "background", "lsapp"] {
+            let result = try runCLI(["--type", type, "--list", "--json"])
+            XCTAssertTrue(result.code == 0 || result.code == 1,
+                          "Expected exit 0 or 1 for --type \(type), got \(result.code)\nstderr=\(result.stderr)")
+        }
+    }
+
+    func testTypeInvalidValue() throws {
+        try assertParseError(["--type", "invalid"], message: "--type must be one of")
+    }
+
+    func testTypeAllRejected() throws {
+        try assertParseError(["--type", "all"], message: "--type must be one of")
+    }
+
+    func testRemovedAllFlagRejected() throws {
+        let result = try runCLI(["--all"])
+        XCTAssertEqual(result.code, 2, "--all should be unknown option")
+        XCTAssertTrue(result.stderr.contains("Unknown option: --all"))
     }
 
     func testVersionOption() throws {
@@ -238,7 +279,10 @@ final class HungDetectCLITests: XCTestCase {
         XCTAssertTrue(result.code == 0 || result.code == 1,
                       "Expected exit 0 or 1, got \(result.code)\nstderr=\(result.stderr)")
         // Header line contains version and scan time
-        assertRegex(result.stdout, "hung_detect \(Self.expectedVersion) \\(built [^)]+\\) scanned \\d{4}-\\d{2}-\\d{2}T")
+        assertRegex(
+            result.stdout,
+            "hung_detect \(Self.expectedVersion) \\(built [^)]+\\) scanned \\d{4}-\\d{2}-\\d{2}[ T]"
+        )
     }
 
     // MARK: - JSON output structure
@@ -305,31 +349,46 @@ final class HungDetectCLITests: XCTestCase {
         try assertParseError(["--name", "nonexistent_app_xyz_999"], message: "No matching processes found")
     }
 
+    func testPidFindsNonLSProcess() throws {
+        // PID 1 (launchd) is not registered with LaunchServices
+        let result = try runCLI(["--pid", "1", "--json"])
+        XCTAssertTrue(result.code == 0 || result.code == 1, result.stderr)
+        let data = result.stdout.data(using: .utf8)!
+        let obj = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let procs = obj["processes"] as! [[String: Any]]
+        XCTAssertEqual(procs.count, 1, "Expected exactly 1 process for PID 1")
+        let proc = procs[0]
+        XCTAssertEqual(proc["pid"] as? Int, 1)
+        // Non-LS process: responding should be null, app_type should be "-"
+        XCTAssertTrue(proc["responding"] is NSNull, "Non-LS process responding should be null")
+        XCTAssertEqual(proc["app_type"] as? String, "-")
+    }
+
     // MARK: - Display flags
 
-    func testAllFlagShowsMultipleProcesses() throws {
-        let result = try runCLI(["--all"])
+    func testListFlagShowsMultipleProcesses() throws {
+        let result = try runCLI(["--list"])
         XCTAssertTrue(result.code == 0 || result.code == 1)
-        // --all should show many processes; at least the table header + a few rows
+        // --list should show many processes; at least the table header + a few rows
         let lines = result.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
-        XCTAssertGreaterThan(lines.count, 5, "Expected multiple output lines with --all")
+        XCTAssertGreaterThan(lines.count, 5, "Expected multiple output lines with --list")
     }
 
-    func testShortAllFlag() throws {
-        let result = try runCLI(["-a"])
+    func testShortListFlag() throws {
+        let result = try runCLI(["-l"])
         XCTAssertTrue(result.code == 0 || result.code == 1)
         let lines = result.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
-        XCTAssertGreaterThan(lines.count, 5, "Expected multiple output lines with -a")
+        XCTAssertGreaterThan(lines.count, 5, "Expected multiple output lines with -l")
     }
 
-    func testForegroundOnlyReducesScope() throws {
-        let all = try runCLI(["--all"])
-        let fg = try runCLI(["--foreground-only", "--all"])
+    func testForegroundOnlyReducesType() throws {
+        let all = try runCLI(["--list"])
+        let fg = try runCLI(["--foreground-only", "--list"])
         // --foreground-only should produce fewer or equal lines
         let allLines = all.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
         let fgLines = fg.stdout.components(separatedBy: "\n").filter { !$0.isEmpty }
         XCTAssertLessThanOrEqual(fgLines.count, allLines.count,
-                                  "--foreground-only should not produce more output than --all alone")
+                                  "--foreground-only should not produce more output than --list alone")
     }
 
     func testNoColorFlagSuppressesANSI() throws {
@@ -344,5 +403,238 @@ final class HungDetectCLITests: XCTestCase {
         let result = try runCLI(["--sha", "--name", "Finder"])
         XCTAssertTrue(result.code == 0 || result.code == 1)
         XCTAssertTrue(result.stdout.contains("SHA"), "Expected SHA column header")
+    }
+
+    // MARK: - MCP config install
+
+    func testMCPInstallAddsCodexConfigSection() throws {
+        try withTemporaryHome { home in
+            let codexDir = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+
+            let configURL = codexDir.appendingPathComponent("config.toml")
+            try """
+            model = "gpt-5.4"
+
+            [projects."/tmp/example"]
+            trust_level = "trusted"
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+
+            let result = try runCLI(["--mcp-install"], env: ["HUNG_DETECT_HOME": home.path])
+            XCTAssertEqual(result.code, 0, result.stderr)
+            XCTAssertTrue(result.stdout.contains("Installed Codex MCP server"), result.stdout)
+
+            let updated = try String(contentsOf: configURL, encoding: .utf8)
+            XCTAssertTrue(updated.contains("[projects.\"/tmp/example\"]"), updated)
+            XCTAssertTrue(updated.contains("[mcp_servers.hung_detect]"), updated)
+            XCTAssertTrue(updated.contains("command = \"hung_detect\""), updated)
+            XCTAssertTrue(updated.contains("\"--mcp\""), updated)
+        }
+    }
+
+    func testMCPUninstallRemovesOnlyCodexHungDetectSection() throws {
+        try withTemporaryHome { home in
+            let codexDir = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+
+            let configURL = codexDir.appendingPathComponent("config.toml")
+            try """
+            model = "gpt-5.4"
+
+            [mcp_servers.ida-pro-mcp]
+            command = "python3"
+            args = ["server.py"]
+
+            [mcp_servers.hung_detect]
+            command = "hung_detect"
+            args = [
+                "--mcp",
+            ]
+
+            [projects."/tmp/example"]
+            trust_level = "trusted"
+            """.write(to: configURL, atomically: true, encoding: .utf8)
+
+            let result = try runCLI(["--mcp-uninstall"], env: ["HUNG_DETECT_HOME": home.path])
+            XCTAssertEqual(result.code, 0, result.stderr)
+            XCTAssertTrue(result.stdout.contains("Uninstalled Codex MCP server"), result.stdout)
+
+            let updated = try String(contentsOf: configURL, encoding: .utf8)
+            XCTAssertTrue(updated.contains("[mcp_servers.ida-pro-mcp]"), updated)
+            XCTAssertTrue(updated.contains("[projects.\"/tmp/example\"]"), updated)
+            XCTAssertFalse(updated.contains("[mcp_servers.hung_detect]"), updated)
+        }
+    }
+
+    // MARK: - MCP install idempotency
+
+    func testMCPInstallTOMLIdempotent() throws {
+        try withTemporaryHome { home in
+            let codexDir = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+
+            let configURL = codexDir.appendingPathComponent("config.toml")
+            try "model = \"gpt-5.4\"\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+
+            // First install
+            let r1 = try runCLI(["--mcp-install"], env: env)
+            XCTAssertEqual(r1.code, 0, r1.stderr)
+            XCTAssertTrue(r1.stdout.contains("Installed Codex"), r1.stdout)
+            let after1 = try String(contentsOf: configURL, encoding: .utf8)
+
+            // Second install — should report "already configured", file unchanged
+            let r2 = try runCLI(["--mcp-install"], env: env)
+            XCTAssertEqual(r2.code, 0, r2.stderr)
+            XCTAssertTrue(r2.stdout.contains("already configured"), r2.stdout)
+            let after2 = try String(contentsOf: configURL, encoding: .utf8)
+
+            XCTAssertEqual(after1, after2, "File should not change on second install")
+        }
+    }
+
+    // MARK: - MCP JSON client install/uninstall
+
+    func testMCPInstallAddsJSONConfig() throws {
+        try withTemporaryHome { home in
+            // Simulate Claude Desktop config dir
+            let claudeDir = home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+            let configURL = claudeDir.appendingPathComponent("claude_desktop_config.json")
+            try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+            let result = try runCLI(["--mcp-install"], env: env)
+            XCTAssertEqual(result.code, 0, result.stderr)
+            XCTAssertTrue(result.stdout.contains("Installed Claude MCP server"), result.stdout)
+
+            let data = try Data(contentsOf: configURL)
+            let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let servers = json["mcpServers"] as! [String: Any]
+            let entry = servers["hung_detect"] as! [String: Any]
+            XCTAssertEqual(entry["command"] as? String, "hung_detect")
+            XCTAssertEqual(entry["args"] as? [String], ["--mcp"])
+        }
+    }
+
+    func testMCPUninstallRemovesJSONConfig() throws {
+        try withTemporaryHome { home in
+            let claudeDir = home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+            let configURL = claudeDir.appendingPathComponent("claude_desktop_config.json")
+            // Pre-populate with hung_detect + another server
+            let initial: [String: Any] = [
+                "mcpServers": [
+                    "hung_detect": ["command": "hung_detect", "args": ["--mcp"]],
+                    "other_tool": ["command": "other", "args": []]
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: initial, options: .prettyPrinted)
+            try data.write(to: configURL)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+            let result = try runCLI(["--mcp-uninstall"], env: env)
+            XCTAssertEqual(result.code, 0, result.stderr)
+            XCTAssertTrue(result.stdout.contains("Uninstalled Claude MCP server"), result.stdout)
+
+            let updated = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: configURL)) as! [String: Any]
+            let servers = updated["mcpServers"] as! [String: Any]
+            XCTAssertNil(servers["hung_detect"], "hung_detect should be removed")
+            XCTAssertNotNil(servers["other_tool"], "other_tool should be preserved")
+        }
+    }
+
+    func testMCPInstallJSONIdempotent() throws {
+        try withTemporaryHome { home in
+            let claudeDir = home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+            let configURL = claudeDir.appendingPathComponent("claude_desktop_config.json")
+            try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+
+            let r1 = try runCLI(["--mcp-install"], env: env)
+            XCTAssertTrue(r1.stdout.contains("Installed Claude"), r1.stdout)
+            let after1 = try String(contentsOf: configURL, encoding: .utf8)
+
+            let r2 = try runCLI(["--mcp-install"], env: env)
+            XCTAssertTrue(r2.stdout.contains("already configured"), r2.stdout)
+            let after2 = try String(contentsOf: configURL, encoding: .utf8)
+
+            XCTAssertEqual(after1, after2, "File should not change on second install")
+        }
+    }
+
+    // MARK: - MCP install preserves file permissions
+
+    func testMCPInstallPreservesFilePermissions() throws {
+        try withTemporaryHome { home in
+            let claudeDir = home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+            let configURL = claudeDir.appendingPathComponent("claude_desktop_config.json")
+            try "{}".write(to: configURL, atomically: true, encoding: .utf8)
+
+            // Set restrictive permissions (0600)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+            let result = try runCLI(["--mcp-install"], env: env)
+            XCTAssertEqual(result.code, 0, result.stderr)
+
+            let attrs = try FileManager.default.attributesOfItem(atPath: configURL.path)
+            let perms = attrs[.posixPermissions] as! Int
+            XCTAssertEqual(perms, 0o600, "File permissions should be preserved after install")
+        }
+    }
+
+    // MARK: - MCP install creates backup
+
+    func testMCPInstallCreatesBackupJSON() throws {
+        try withTemporaryHome { home in
+            let claudeDir = home.appendingPathComponent("Library/Application Support/Claude", isDirectory: true)
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+            let configURL = claudeDir.appendingPathComponent("claude_desktop_config.json")
+            let original = "{}\n"
+            try original.write(to: configURL, atomically: true, encoding: .utf8)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+            let result = try runCLI(["--mcp-install"], env: env)
+            XCTAssertEqual(result.code, 0, result.stderr)
+
+            let backupURL = claudeDir.appendingPathComponent("claude_desktop_config.json.bak")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path),
+                          "Backup file should be created")
+            let backup = try String(contentsOf: backupURL, encoding: .utf8)
+            XCTAssertEqual(backup, original, "Backup should contain original content")
+        }
+    }
+
+    func testMCPInstallCreatesBackupTOML() throws {
+        try withTemporaryHome { home in
+            let codexDir = home.appendingPathComponent(".codex", isDirectory: true)
+            try FileManager.default.createDirectory(at: codexDir, withIntermediateDirectories: true)
+
+            let configURL = codexDir.appendingPathComponent("config.toml")
+            let original = "model = \"gpt-5.4\"\n"
+            try original.write(to: configURL, atomically: true, encoding: .utf8)
+
+            let env = ["HUNG_DETECT_HOME": home.path]
+            let result = try runCLI(["--mcp-install"], env: env)
+            XCTAssertEqual(result.code, 0, result.stderr)
+
+            let backupURL = codexDir.appendingPathComponent("config.toml.bak")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path),
+                          "Backup file should be created")
+            let backup = try String(contentsOf: backupURL, encoding: .utf8)
+            XCTAssertEqual(backup, original, "Backup should contain original content")
+        }
     }
 }

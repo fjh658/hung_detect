@@ -30,118 +30,8 @@ final class HungDetectCoreTests: XCTestCase {
         ProcessSnapshot(name: name,
                         bundleID: bundleID,
                         foregroundApp: foregroundApp,
-                        responding: responding)
-    }
-
-    func testSymbolResolutionChainPrefersFrameworkLookup() {
-        var frameworkCalls = 0
-        var dynamicCalls = 0
-        let frameworkPtr = UnsafeMutableRawPointer(bitPattern: 0x1234)
-
-        let chain = SymbolResolutionChain(
-            frameworkLookup: { frameworkPaths, names in
-                frameworkCalls += 1
-                XCTAssertEqual(frameworkPaths, ["/Framework"])
-                XCTAssertEqual(names, ["TargetSym"])
-                return frameworkPtr
-            },
-            dynamicLookup: { _, _ in
-                dynamicCalls += 1
-                return UnsafeMutableRawPointer(bitPattern: 0x5678)
-            }
-        )
-
-        let result = chain.resolve(frameworkPaths: ["/Framework"],
-                                   handles: [],
-                                   names: ["TargetSym"])
-        XCTAssertEqual(result, frameworkPtr)
-        XCTAssertEqual(frameworkCalls, 1)
-        XCTAssertEqual(dynamicCalls, 0)
-    }
-
-    func testSymbolResolutionChainFallsBackToDynamicLookup() {
-        var frameworkCalls = 0
-        var dynamicCalls = 0
-        let fallbackPtr = UnsafeMutableRawPointer(bitPattern: 0x5678)
-        let handle = UnsafeMutableRawPointer(bitPattern: 0x1111)!
-
-        let chain = SymbolResolutionChain(
-            frameworkLookup: { _, _ in
-                frameworkCalls += 1
-                return nil
-            },
-            dynamicLookup: { handles, names in
-                dynamicCalls += 1
-                XCTAssertEqual(handles, [handle])
-                XCTAssertEqual(names, ["TargetSym", "_TargetSym"])
-                return fallbackPtr
-            }
-        )
-
-        let result = chain.resolve(frameworkPaths: ["/Framework"],
-                                   handles: [handle],
-                                   names: ["TargetSym", "_TargetSym"])
-        XCTAssertEqual(result, fallbackPtr)
-        XCTAssertEqual(frameworkCalls, 1)
-        XCTAssertEqual(dynamicCalls, 1)
-    }
-
-    func testSymbolResolutionChainReturnsNilWhenBothMiss() {
-        var frameworkCalls = 0
-        var dynamicCalls = 0
-        let handle = UnsafeMutableRawPointer(bitPattern: 0x2222)!
-
-        let chain = SymbolResolutionChain(
-            frameworkLookup: { _, _ in
-                frameworkCalls += 1
-                return nil
-            },
-            dynamicLookup: { _, _ in
-                dynamicCalls += 1
-                return nil
-            }
-        )
-
-        let result = chain.resolve(frameworkPaths: ["/Framework"],
-                                   handles: [handle],
-                                   names: ["MissingSym"])
-        XCTAssertNil(result)
-        XCTAssertEqual(frameworkCalls, 1)
-        XCTAssertEqual(dynamicCalls, 1)
-    }
-
-    func testRuntimeSymbolCatalogCGSPathsAndSymbols() {
-        XCTAssertEqual(RuntimeSymbolCatalog.cgsFrameworkPaths, [
-            "/System/Library/PrivateFrameworks/SkyLight.framework",
-            "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A",
-        ])
-        XCTAssertEqual(RuntimeSymbolCatalog.cgsLibraryPaths, [
-            "/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight",
-            "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
-        ])
-        XCTAssertEqual(RuntimeSymbolCatalog.cgsMainConnectionSymbols, ["CGSMainConnectionID", "_CGSMainConnectionID"])
-        XCTAssertEqual(RuntimeSymbolCatalog.cgsEventIsUnresponsiveSymbols, ["CGSEventIsAppUnresponsive", "_CGSEventIsAppUnresponsive"])
-        XCTAssertEqual(RuntimeSymbolCatalog.cgsRegisterNotifySymbols, ["CGSRegisterNotifyProc", "_CGSRegisterNotifyProc"])
-        XCTAssertEqual(RuntimeSymbolCatalog.cgsRemoveNotifySymbols, ["CGSRemoveNotifyProc", "_CGSRemoveNotifyProc"])
-    }
-
-    func testRuntimeSymbolCatalogLaunchServicesPathsAndSymbols() {
-        XCTAssertEqual(RuntimeSymbolCatalog.launchServicesFrameworkPaths, [
-            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework",
-            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework",
-            "/System/Library/PrivateFrameworks/LaunchServices.framework",
-            "/System/Library/PrivateFrameworks/LaunchServices.framework/Versions/A",
-        ])
-        XCTAssertEqual(RuntimeSymbolCatalog.launchServicesLibraryPaths, [
-            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Versions/A/LaunchServices",
-            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/LaunchServices",
-            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices",
-            "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/LaunchServices",
-            "/System/Library/PrivateFrameworks/LaunchServices.framework/Versions/A/LaunchServices",
-            "/System/Library/PrivateFrameworks/LaunchServices.framework/LaunchServices",
-        ])
-        XCTAssertEqual(RuntimeSymbolCatalog.lsasnCreateSymbols, ["LSASNCreateWithPid", "_LSASNCreateWithPid", "__LSASNCreateWithPid"])
-        XCTAssertEqual(RuntimeSymbolCatalog.lsasnExtractSymbols, ["LSASNExtractHighAndLowParts", "_LSASNExtractHighAndLowParts", "__LSASNExtractHighAndLowParts"])
+                        responding: responding,
+                        appType: foregroundApp ? .foreground : .uiElement)
     }
 
     func testFormatUptimeBoundaries() {
@@ -167,7 +57,7 @@ final class HungDetectCoreTests: XCTestCase {
         let opts = CLI.parseArgs([])
         XCTAssertFalse(opts.monitor)
         XCTAssertEqual(opts.interval, 3.0, accuracy: 0.0001)
-        XCTAssertFalse(opts.foregroundOnly)
+        XCTAssertFalse(opts.processType == .foreground)
         XCTAssertFalse(opts.sample)
         XCTAssertFalse(opts.spindump)
         XCTAssertFalse(opts.full)
@@ -221,7 +111,7 @@ final class HungDetectCoreTests: XCTestCase {
 
     func testParseArgsForegroundOnly() {
         let opts = CLI.parseArgs(["--foreground-only"])
-        XCTAssertTrue(opts.foregroundOnly)
+        XCTAssertTrue(opts.processType == .foreground)
     }
 
     func testParseArgsDurationThenSpecificOverride() {
@@ -437,11 +327,30 @@ final class HungDetectCoreTests: XCTestCase {
         XCTAssertTrue(opts.noColor)
     }
 
-    func testParseArgsAllFlag() {
-        let opts = CLI.parseArgs(["--all"])
-        XCTAssertTrue(opts.showAll)
-        let short = CLI.parseArgs(["-a"])
-        XCTAssertTrue(short.showAll)
+    func testParseArgsListFlag() {
+        let opts = CLI.parseArgs(["--list"])
+        XCTAssertTrue(opts.list)
+        let short = CLI.parseArgs(["-l"])
+        XCTAssertTrue(short.list)
+    }
+
+    func testParseArgsTypeFlag() {
+        let def = CLI.parseArgs([])
+        XCTAssertEqual(def.processType, .lsapp)
+
+        let fg = CLI.parseArgs(["--type", "foreground"])
+        XCTAssertEqual(fg.processType, .foreground)
+        XCTAssertTrue(fg.processType == .foreground)
+
+        let gui = CLI.parseArgs(["--type", "gui"])
+        XCTAssertEqual(gui.processType, .gui)
+
+        let bg = CLI.parseArgs(["--type", "background"])
+        XCTAssertEqual(bg.processType, .background)
+
+        let fgOnly = CLI.parseArgs(["--foreground-only"])
+        XCTAssertEqual(fgOnly.processType, .foreground)
+        XCTAssertTrue(fgOnly.processType == .foreground)
     }
 
     func testParseArgsShaFlag() {

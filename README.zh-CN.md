@@ -2,12 +2,12 @@
 
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README.zh-CN.md)
 
-`hung_detect` 是一个用 Swift 实现的 macOS GUI 进程“未响应”检测工具。
-它使用与活动监视器一致的私有 Window Server 信号（`CGSEventIsAppUnresponsive`）。
+`hung_detect` 是一个用 Swift 实现的 macOS 进程”未响应”检测工具。
+它使用与活动监视器一致的私有 Window Server API 和 LaunchServices 集成（`CGSEventIsAppUnresponsive`）。
 
 ## ✨ 功能
 
-- 用活动监视器风格的信号判断 GUI 应用是否未响应。
+- 检测所有 LaunchServices 已知进程的未响应状态（Foreground、UIElement、BackgroundOnly）——与活动监视器范围一致。
 - 支持通用二进制构建（`arm64` + `x86_64`）。
 - 最低系统版本由 `Package.swift` 定义（`macOS 12+`）。
 - 支持终端表格输出和 JSON 输出。
@@ -15,6 +15,7 @@
 - 可选显示 SHA-256。
 - **监控模式**：持续 push+poll 监听 hung 状态变化（NDJSON 事件流）。
 - **内置诊断**：自动对 hung 进程执行 `sample` 和 `spindump`。
+- **MCP 服务器**：基于 stdio 的 JSON-RPC 服务，可与 AI 工具（Claude、Cursor、VS Code 等）集成。
 
 ## 🧰 环境要求
 
@@ -41,31 +42,18 @@ make check
 ./build_hung_detect.sh
 ```
 
-## 🍺 Homebrew Tap 安装
-
-Homebrew 安装会直接使用 `dist/` 中的预编译二进制包，不在用户机器上编译。
-
-本地把当前仓库作为 tap：
+## 🍺 Homebrew 安装
 
 ```bash
-brew tap fjh658/hung-detect /path/to/hung_detect
+brew tap fjh658/tap
 brew install hung-detect
 ```
 
-从 GitHub tap 安装：
+Formula 托管在 [fjh658/homebrew-tap](https://github.com/fjh658/homebrew-tap)。二进制从 GitHub Releases 下载（无需编译）。
 
-```bash
-brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
-brew install hung-detect
-```
+### 打包（维护者用）
 
-发布前更新预编译包（默认仅二进制）：
-
-```bash
-make package
-```
-
-如需把调试符号一起打进发布包（用于崩溃符号化）：
+构建通用二进制并创建发布包：
 
 ```bash
 make package INCLUDE_DSYM=1
@@ -76,9 +64,10 @@ make package INCLUDE_DSYM=1
 ## 🚀 使用示例
 
 ```bash
-./hung_detect                             # 检测 hung 应用（有则 exit 1）
-./hung_detect --all                       # 列出所有 GUI 应用详情
-./hung_detect --foreground-only           # 仅扫描前台类型应用
+./hung_detect                             # 检测 hung 进程（有则 exit 1）
+./hung_detect --list                      # 列出所有 LaunchServices 已知进程
+./hung_detect --type foreground           # 仅扫描前台应用（Dock 应用）
+./hung_detect --type gui                  # 前台 + UIElement（菜单栏应用）
 ./hung_detect --json                      # 机器可读 JSON 输出
 ./hung_detect --name Chrome               # 显示 Chrome 进程
 ./hung_detect --pid 913                   # 显示指定 PID
@@ -94,6 +83,64 @@ sudo ./hung_detect --full --spindump-duration 5 --spindump-system-duration 5  # 
 ./hung_detect -m --sample                 # 监控 + 自动诊断
 sudo ./hung_detect -m --full              # 监控 + 完整自动诊断
 sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # 监控 + 完整自动诊断（spindump 5 秒）
+
+# MCP 服务器（AI 集成）
+hung_detect --mcp-install                # 自动安装到所有检测到的 AI 客户端
+hung_detect --mcp-config                 # 打印配置 JSON 用于手动设置
+hung_detect --mcp                        # 启动 MCP 服务器（由 AI 客户端调用）
+```
+
+## 🤖 MCP 服务器（AI 集成）
+
+hung_detect 内置 [MCP](https://modelcontextprotocol.io/)（Model Context Protocol）服务器，AI 助手可以实时检测和监控未响应进程。
+
+### 快速配置
+
+```bash
+# 自动安装到所有检测到的 AI 客户端（Claude、Codex、Claude Code、Cursor、Windsurf 等）
+hung_detect --mcp-install
+
+# 或打印配置 JSON 手动设置
+hung_detect --mcp-config
+
+# 从所有客户端移除
+hung_detect --mcp-uninstall
+```
+
+`--mcp-install` 支持自动检测并配置：Claude Desktop、Codex、Claude Code、Cursor、Windsurf、Cline、Roo Code、Kilo Code、LM Studio、Gemini CLI、BoltAI、Warp、Amazon Q、VS Code。
+
+### 工具列表
+
+MCP 服务器通过 stdio（JSON-RPC 2.0）提供 5 个工具：
+
+| 工具 | 说明 |
+|---|---|
+| `scan` | 扫描所有 LS 已知进程。可选参数：`list`、`show_sha`、`foreground_only`、`type` |
+| `check_pid` | 按 PID 检查指定进程的 hung 状态 |
+| `check_name` | 按名称或 bundle ID 查找进程（不区分大小写子串匹配） |
+| `start_monitor` | 启动后台监控，状态变化时推送通知 |
+| `stop_monitor` | 停止后台监控 |
+
+### 监控通知
+
+监控启动后，服务器在状态变化时推送 `notifications/message`（MCP logging）：
+
+- **`became_hung`**（级别：`alert`）— 进程变为未响应
+- **`became_responsive`**（级别：`info`）— 之前 hung 的进程恢复响应
+- **`process_exited`**（级别：`info`）— 被监控的进程已退出
+
+### 架构
+
+- **传输层**：stdio（stdin/stdout），不暴露网络端口
+- **生命周期**：AI 客户端以子进程方式启动 `hung_detect --mcp`；stdin 关闭后进程自动退出
+- **线程模型**：后台线程读 stdin，主线程运行 CFRunLoop 处理定时器和 AppKit，stdout 通过锁序列化
+- **多实例**：安全 — `CGSEventIsAppUnresponsive` 为只读调用，无资源竞争
+
+### 手动使用
+
+```bash
+# 启动 MCP 服务器（由 AI 客户端调用，通常不直接运行）
+hung_detect --mcp
 ```
 
 ## 🖼️ 截图
@@ -109,9 +156,9 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 ```
 ```json
 {
-  "version": "0.5.1",
-  "build_time": "2026-02-28T00:22:49.853+08:00",
-  "scan_time": "2026-02-28T00:23:00.027+08:00",
+  "version": "0.5.2",
+  "build_time": "2026-02-28 00:22:49.853+08:00",
+  "scan_time": "2026-02-28 00:23:00.027+08:00",
   "summary": { "total": 1, "not_responding": 1, "ok": 0 },
   "processes": [
     {
@@ -140,15 +187,22 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 ## ⚙️ CLI 参数
 
 **检测：**
-- `--all`, `-a`：显示所有匹配 GUI 进程（默认仅显示未响应进程）。
+- `--list`, `-l`：列出所有匹配进程（默认仅显示未响应进程）。
 - `--sha`：在表格输出中显示 SHA-256 列。
-- `--foreground-only`：仅包含前台类型应用（`activationPolicy == .regular`）。
+- `--type <TYPE>`：进程类型 — `foreground`、`uielement`、`gui`、`background`、`lsapp`（默认：`lsapp`）。
+- `--foreground-only`：等同于 `--type foreground`。
 - `--pid <PID>`：按 PID 过滤（可重复）。
 - `--name <NAME>`：按应用名或 bundle ID 过滤（可重复）。
 - `--json`：输出 JSON（始终包含 `sha256` 字段）。
 - `--no-color`：关闭 ANSI 颜色。
 - `-v`, `--version`：显示版本。
 - `-h`, `--help`：显示帮助。
+
+**MCP 服务器：**
+- `--mcp`：以 MCP 服务器模式运行（JSON-RPC 2.0 over stdio）。
+- `--mcp-config`：打印 MCP 服务器配置 JSON。
+- `--mcp-install`：自动安装 MCP 配置到所有检测到的 AI 客户端。
+- `--mcp-uninstall`：从所有 AI 客户端移除 MCP 配置。
 
 **监控：**
 - `--monitor`, `-m`：持续监控模式（Ctrl+C 停止）。
@@ -200,12 +254,13 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 | 监控机制 | push + poll | push + poll，push 不可用时自动退化为 poll-only | 对齐 |
 | 启动期 push 窗口处理 | 通过内部刷新快速收敛 | unknown PID push 会触发一次即时 rescan | 对齐 |
 | push 回调作用范围 | 前台应用类型 | push 更新仅应用于前台应用类型 | 对齐 |
-| 默认扫描范围 | 偏应用视角 | 默认全 GUI 进程（可选 `--foreground-only`） | 扩展 |
+| 默认扫描范围 | 偏应用视角 | 默认全 LaunchServices 已知进程（可用 `--type` 过滤） | 扩展 |
 | 输出形态 | 仅 GUI | 表格 + JSON + NDJSON 事件流 | 扩展 |
 | 诊断采集能力 | 以手动流程为主 | 内置 `sample` / `spindump` / `--full` | 扩展 |
 | spindump 权限策略 | 应用内部流程 | `--spindump` / `--full` 严格预检，失败即退出 | 有意差异 |
 | sudo 产物属主 | 不适用 | 自动回写为真实用户属主 | 扩展 |
 | 自动化集成 | 较弱 | 明确退出码与脚本化参数 | 扩展 |
+| AI 工具集成 | 无 | 内置 MCP 服务器，支持扫描、监控和推送通知 | 扩展 |
 
 ## 🧵 并发模型
 
@@ -221,7 +276,7 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 - SHA-256 和代码签名信息均延迟计算，只对最终输出的行计算。
 - 代码签名采用两阶段查询：先快速检查签名标志位识别 adhoc/unsigned，只有真正有证书的才做昂贵的 `SecCodeCopySigningInformation`（`kSecCSSigningInformation`）调用。
 - SHA-256 和签名结果均按可执行路径缓存（NSCache），同一次运行中共享同一二进制的进程不重复查询（如 326 个进程 → 152 个唯一路径 → 174 次缓存命中）。
-- `--json --all` 会比默认模式慢，因为需要输出并哈希所有匹配进程。
+- `--json --list` 会比默认模式慢，因为需要输出并哈希所有匹配进程。
 
 性能实测（326 进程，152 唯一路径）：
 
@@ -229,8 +284,8 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 |---|---|
 | 默认（仅 hung） | ~0.1s |
 | `--name <APP>` | ~0.09s |
-| `--all` 有缓存 | ~1.2s |
-| `--all` 无缓存 | ~1.4s (+12%) |
+| `--list` 有缓存 | ~1.2s |
+| `--list` 无缓存 | ~1.4s (+12%) |
 
 ## 🩺 诊断
 

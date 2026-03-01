@@ -1,0 +1,19 @@
+class HungDetect < Formula
+  desc "Detect Not Responding macOS processes — same API as Activity Monitor"
+  homepage "https://github.com/fjh658/hung_detect"
+  license "Apache-2.0"
+  version "__VERSION__"
+
+  url "https://github.com/fjh658/hung_detect/releases/download/v__VERSION__/hung-detect-__VERSION__-macos-universal.tar.gz"
+  sha256 "__SHA256__"
+
+  depends_on :macos
+
+  def install
+    bin.install "hung_detect"
+  end
+
+  test do
+    assert_match "hung_detect", shell_output("#{bin}/hung_detect --help")
+  end
+end

@@ -2,12 +2,12 @@
 
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README.zh-CN.md)
 
-`hung_detect` is a macOS GUI process "Not Responding" detector implemented in Swift.
-It uses the same private Window Server signal used by Activity Monitor (`CGSEventIsAppUnresponsive`).
+`hung_detect` is a macOS process "Not Responding" detector implemented in Swift.
+It uses the same private Window Server API and LaunchServices integration as Activity Monitor (`CGSEventIsAppUnresponsive`).
 
 ## ✨ Features
 
-- Detects unresponsive GUI apps with the Activity Monitor style signal.
+- Detects unresponsive processes across all LaunchServices-known types (Foreground, UIElement, BackgroundOnly) — same scope as Activity Monitor.
 - Universal binary build (`arm64` + `x86_64`).
 - macOS deployment target is defined in `Package.swift` (`macOS 12+`).
 - Table output for terminal and JSON output for automation.
@@ -15,6 +15,7 @@ It uses the same private Window Server signal used by Activity Monitor (`CGSEven
 - Optional SHA-256 output.
 - **Monitor mode**: continuous push+poll monitoring for hung state changes (NDJSON event stream).
 - **Built-in diagnosis**: automatically run `sample` and `spindump` on hung processes.
+- **MCP server**: stdio-based JSON-RPC server for AI tool integration (Claude, Cursor, VS Code, etc.).
 
 ## 🧰 Requirements
 
@@ -41,31 +42,18 @@ Legacy wrapper (delegates to Makefile):
 ./build_hung_detect.sh
 ```
 
-## 🍺 Homebrew Tap Install
-
-Homebrew install uses the prebuilt binary package in `dist/` and does not compile on the end-user machine.
-
-Tap this repository locally:
+## 🍺 Homebrew Install
 
 ```bash
-brew tap fjh658/hung-detect /path/to/hung_detect
+brew tap fjh658/tap
 brew install hung-detect
 ```
 
-Install from GitHub tap:
+Formula is hosted at [fjh658/homebrew-tap](https://github.com/fjh658/homebrew-tap). Binary is downloaded from GitHub Releases (no compilation on user machine).
 
-```bash
-brew tap fjh658/hung-detect https://github.com/fjh658/hung_detect.git
-brew install hung-detect
-```
+### Packaging (for maintainers)
 
-Refresh prebuilt package before release (default: binary only):
-
-```bash
-make package
-```
-
-Include debug symbols in the release tarball when needed (for crash symbolication):
+Build universal binary and create release tarball:
 
 ```bash
 make package INCLUDE_DSYM=1
@@ -76,9 +64,10 @@ make package INCLUDE_DSYM=1
 ## 🚀 Usage
 
 ```bash
-./hung_detect                             # Detect hung apps (exit 1 if any)
-./hung_detect --all                       # List all GUI apps with details
-./hung_detect --foreground-only           # Only scan foreground-type apps
+./hung_detect                             # Detect hung processes (exit 1 if any)
+./hung_detect --list                      # List all LaunchServices-known processes
+./hung_detect --type foreground           # Only scan foreground apps (Dock apps)
+./hung_detect --type gui                  # Foreground + UIElement (menu bar apps)
 ./hung_detect --json                      # Machine-readable JSON output
 ./hung_detect --name Chrome               # Show Chrome processes
 ./hung_detect --pid 913                   # Show specific PID
@@ -94,6 +83,64 @@ sudo ./hung_detect --full --spindump-duration 5 --spindump-system-duration 5  # 
 ./hung_detect -m --sample                 # Monitor + auto-diagnose on hung
 sudo ./hung_detect -m --full              # Monitor + full auto-diagnose on hung
 sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # Monitor + full with 5s spindumps
+
+# MCP server (AI integration)
+hung_detect --mcp-install                # Auto-install to all detected AI clients
+hung_detect --mcp-config                 # Print config JSON for manual setup
+hung_detect --mcp                        # Start MCP server (used by AI clients)
+```
+
+## 🤖 MCP Server (AI Integration)
+
+hung_detect includes a built-in [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server, allowing AI assistants to detect and monitor Not Responding processes in real time.
+
+### Quick Setup
+
+```bash
+# Auto-install to all detected AI clients (Claude, Codex, Claude Code, Cursor, Windsurf, etc.)
+hung_detect --mcp-install
+
+# Or print config JSON for manual setup
+hung_detect --mcp-config
+
+# Remove from all clients
+hung_detect --mcp-uninstall
+```
+
+`--mcp-install` detects and configures: Claude Desktop, Codex, Claude Code, Cursor, Windsurf, Cline, Roo Code, Kilo Code, LM Studio, Gemini CLI, BoltAI, Warp, Amazon Q, VS Code.
+
+### Tools
+
+The MCP server exposes 5 tools over stdio (JSON-RPC 2.0):
+
+| Tool | Description |
+|---|---|
+| `scan` | Scan all LS-known processes. Options: `list`, `show_sha`, `foreground_only`, `type` |
+| `check_pid` | Check a specific PID for hung status |
+| `check_name` | Find processes by name or bundle ID (case-insensitive substring) |
+| `start_monitor` | Start background monitoring with push notifications on state changes |
+| `stop_monitor` | Stop background monitoring |
+
+### Monitor Notifications
+
+When monitoring is active, the server pushes `notifications/message` (MCP logging) on state transitions:
+
+- **`became_hung`** (level: `alert`) — a process stopped responding
+- **`became_responsive`** (level: `info`) — a previously hung process recovered
+- **`process_exited`** (level: `info`) — a monitored process terminated
+
+### Architecture
+
+- **Transport**: stdio (stdin/stdout), no network ports exposed
+- **Lifecycle**: AI client spawns `hung_detect --mcp` as a subprocess; process exits cleanly when stdin closes
+- **Threading**: stdin reader on background thread, main thread runs CFRunLoop for timers and AppKit, stdout serialized via lock
+- **Multi-instance**: safe — `CGSEventIsAppUnresponsive` is read-only, no contention
+
+### Manual Usage
+
+```bash
+# Start MCP server (used by AI clients, not typically run directly)
+hung_detect --mcp
 ```
 
 ## 🖼️ Screenshots
@@ -109,9 +156,9 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 ```
 ```json
 {
-  "version": "0.5.1",
-  "build_time": "2026-02-28T00:22:49.853+08:00",
-  "scan_time": "2026-02-28T00:23:00.027+08:00",
+  "version": "0.5.2",
+  "build_time": "2026-02-28 00:22:49.853+08:00",
+  "scan_time": "2026-02-28 00:23:00.027+08:00",
   "summary": { "total": 1, "not_responding": 1, "ok": 0 },
   "processes": [
     {
@@ -140,15 +187,22 @@ sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5 
 ## ⚙️ CLI Options
 
 **Detection:**
-- `--all`, `-a`: show all matched GUI processes (default shows only not responding).
+- `--list`, `-l`: list all matched processes (default shows only not responding).
 - `--sha`: include SHA-256 column in table output.
-- `--foreground-only`: only include foreground-type apps (`activationPolicy == .regular`).
+- `--type <TYPE>`: process type — `foreground`, `uielement`, `gui`, `background`, `lsapp` (default: `lsapp`).
+- `--foreground-only`: alias for `--type foreground`.
 - `--pid <PID>`: filter by PID (repeatable).
 - `--name <NAME>`: filter by app name or bundle ID (repeatable).
 - `--json`: JSON output (always includes `sha256` field).
 - `--no-color`: disable ANSI colors.
 - `-v`, `--version`: show version.
 - `-h`, `--help`: show help.
+
+**MCP Server:**
+- `--mcp`: run as MCP server over stdio (JSON-RPC 2.0).
+- `--mcp-config`: print MCP server configuration JSON.
+- `--mcp-install`: install MCP config to all detected AI clients.
+- `--mcp-uninstall`: remove MCP config from all detected AI clients.
 
 **Monitor:**
 - `--monitor`, `-m`: continuous monitoring mode (Ctrl+C to stop).
@@ -200,12 +254,13 @@ If all required symbols cannot be resolved, the program exits with code `2`.
 | Monitor mechanism | push + poll | push + poll, fallback to poll-only when push unavailable | Aligned |
 | Startup push gap handling | fast convergence via internal state refresh | unknown PID push triggers immediate rescan | Aligned |
 | Push callback scope | foreground app type | push update applies to foreground app type | Aligned |
-| Default scan scope | app-centric | all GUI processes by default (`--foreground-only` optional) | Extended |
+| Default scan scope | app-centric | all LaunchServices-known processes by default (`--type` to filter) | Extended |
 | Output form | GUI only | table + JSON + NDJSON monitor stream | Extended |
 | Diagnosis capture | mostly manual workflow | built-in `sample` / `spindump` / `--full` | Extended |
 | Spindump privilege behavior | internal app flow | strict fail-fast for `--spindump` / `--full` | Intentional difference |
 | Sudo artifact ownership | N/A | chown outputs back to invoking user | Extended |
 | Automation integration | limited | stable CLI exit codes + scriptable flags | Extended |
+| AI tool integration | N/A | built-in MCP server with scan, monitor, and push notifications | Extended |
 
 ## 🧵 Concurrency Model
 
@@ -221,7 +276,7 @@ If all required symbols cannot be resolved, the program exits with code `2`.
 - SHA-256 and code signing authority are computed lazily for rows that are actually emitted.
 - Code signing uses a two-pass approach: a fast flag check identifies ad-hoc/unsigned binaries without certificate extraction; only properly signed binaries pay the cost of `SecCodeCopySigningInformation` with `kSecCSSigningInformation`.
 - Both SHA-256 and code signing results are cached by executable path within a single run (NSCache), avoiding redundant lookups when multiple processes share the same binary (e.g. 326 processes → 152 unique paths → 174 cache hits).
-- `--json --all` can be noticeably slower than default mode because it emits and hashes every matched process.
+- `--json --list` can be noticeably slower than default mode because it emits and hashes every matched process.
 
 Benchmark (326 processes, 152 unique paths):
 
@@ -229,8 +284,8 @@ Benchmark (326 processes, 152 unique paths):
 |---|---|
 | Default (hung only) | ~0.1s |
 | `--name <APP>` | ~0.09s |
-| `--all` with cache | ~1.2s |
-| `--all` without cache | ~1.4s (+12%) |
+| `--list` with cache | ~1.2s |
+| `--list` without cache | ~1.4s (+12%) |
 
 ## 🩺 Diagnosis
 
