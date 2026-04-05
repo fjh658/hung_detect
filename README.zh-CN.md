@@ -1,93 +1,74 @@
-# hung_detect 🔍
+# hung_detect 🔍 — macOS「未响应」检测器
 
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README.zh-CN.md)
 
-`hung_detect` 是一个用 Swift 实现的 macOS 进程”未响应”检测工具。
-它使用与活动监视器一致的私有 Window Server API 和 LaunchServices 集成（`CGSEventIsAppUnresponsive`）。
+[![Platform](https://img.shields.io/badge/platform-macOS%2012+-black?logo=apple)](https://github.com/fjh658/hung_detect)
+[![Homebrew](https://img.shields.io/badge/homebrew-v0.5.2-orange?logo=homebrew)](https://github.com/fjh658/homebrew-tap)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## ✨ 功能
+使用与活动监视器相同的 Window Server API 检测「未响应」进程。一条命令，即时结果。
 
-- 检测所有 LaunchServices 已知进程的未响应状态（Foreground、UIElement、BackgroundOnly）——与活动监视器范围一致。
-- 支持通用二进制构建（`arm64` + `x86_64`）。
-- 最低系统版本由 `Package.swift` 定义（`macOS 12+`）。
-- 支持终端表格输出和 JSON 输出。
-- 输出进程元信息：PID、父 PID、用户、Bundle ID、架构、代码签名证书、沙盒状态、防睡眠状态、运行时长、可执行文件路径。
-- 可选显示 SHA-256。
-- **监控模式**：持续 push+poll 监听 hung 状态变化（NDJSON 事件流）。
-- **内置诊断**：自动对 hung 进程执行 `sample` 和 `spindump`。
-- **MCP 服务器**：基于 stdio 的 JSON-RPC 服务，可与 AI 工具（Claude、Cursor、VS Code 等）集成。
+<p align="left">
+  <img src="images/hung_detect.png" width="90%" alt="hung_detect 检测到 hung 进程">
+</p>
 
-## 🧰 环境要求
-
-- macOS
-- Xcode 命令行工具（`swift`、`xcrun`）
-
-## 🏗️ 构建
-
-构建通用二进制：
-
-```bash
-make build
-```
-
-检查产物架构和 `minos`：
-
-```bash
-make check
-```
-
-兼容脚本入口（内部会转调 Makefile）：
-
-```bash
-./build_hung_detect.sh
-```
-
-## 🍺 Homebrew 安装
+## 安装
 
 ```bash
 brew tap fjh658/tap
 brew install hung-detect
 ```
 
-Formula 托管在 [fjh658/homebrew-tap](https://github.com/fjh658/homebrew-tap)。二进制从 GitHub Releases 下载（无需编译）。
+或从源码构建：`make build`（需要 Xcode 命令行工具）
 
-### 打包（维护者用）
-
-构建通用二进制并创建发布包：
+## 快速开始
 
 ```bash
-make package INCLUDE_DSYM=1
+hung_detect                    # 检测 hung 进程（有则 exit 1）
+hung_detect -l                 # 列出所有进程及状态
+hung_detect --pid 913          # 查指定 PID
+hung_detect --name Safari      # 按名称查
+hung_detect -m                 # 监控模式：持续监听状态变化
+hung_detect --sample           # 自动对 hung 进程采样
+hung_detect -m --sample        # 监控 + 自动采样
 ```
 
-`make package` 还会基于 `Formula/hung-detect.rb.tmpl` 自动刷新 `Formula/hung-detect.rb`，并注入当前版本（来自 `Sources/hung_detect/Version.swift`）与当前打包模式下 tarball 的 `sha256`。
+## 功能特性
 
-## 🚀 使用示例
+- **与活动监视器同源** — 使用 `CGSEventIsAppUnresponsive`（SkyLight/LaunchServices 私有 API）。检测所有 LS 注册进程类型（Foreground、UIElement、BackgroundOnly）。
+- **监控模式** — push+poll 双层检测，NDJSON 事件流输出。通过 `CGSRegisterNotifyProc` 推送，poll 作为兜底。
+- **内置诊断** — 自动对 hung 进程执行 `/usr/bin/sample` 和 `/usr/sbin/spindump`。`--full` 支持系统级 spindump。
+- **MCP 服务器** — stdio JSON-RPC 服务，一条命令安装到 14 个 AI 客户端（Claude、Codex、Cursor 等）。
+- **丰富元数据** — PID、PPID、用户、Bundle ID、架构、代码签名、沙盒状态、防睡眠、运行时长、SHA-256。
+- **高性能** — `proc_listpids`（比 sysctl 轻 162 倍）、LS 信息按 PID 生命周期缓存、每进程单次 sysctl、CGS 函数编译时链接。
+- **通用二进制** — `arm64` + `x86_64`，macOS 12+。
+
+## 使用示例
 
 ```bash
-./hung_detect                             # 检测 hung 进程（有则 exit 1）
-./hung_detect --list                      # 列出所有 LaunchServices 已知进程
-./hung_detect --type foreground           # 仅扫描前台应用（Dock 应用）
-./hung_detect --type gui                  # 前台 + UIElement（菜单栏应用）
-./hung_detect --json                      # 机器可读 JSON 输出
-./hung_detect --name Chrome               # 显示 Chrome 进程
-./hung_detect --pid 913                   # 显示指定 PID
+# 检测
+hung_detect                              # 检测 hung 进程（有则 exit 1）
+hung_detect -l                           # 列出所有 LS 注册进程
+hung_detect --type foreground -l         # 仅 Dock 应用
+hung_detect --type gui -l                # Dock + 菜单栏应用
+hung_detect --json                       # JSON 输出
+hung_detect --pid 1                      # 查任意 PID（含非 LS 进程）
+hung_detect --name Chrome                # 按名称或 Bundle ID 搜索
 
 # 监控模式
-./hung_detect --monitor                   # 监听 hung 状态变化
-./hung_detect -m --json | jq .            # 以 NDJSON 流输出事件
-./hung_detect -m --name Safari --interval 2  # 每 2 秒监控 Safari
+hung_detect -m                           # 持续监听 hung 状态变化
+hung_detect -m --json | jq .             # NDJSON 事件流
+hung_detect -m --name Safari --interval 2  # 每 2 秒监控 Safari
 
-# 诊断
-./hung_detect --sample                    # 检测 + 对 hung 进程采样
-sudo ./hung_detect --full --spindump-duration 5 --spindump-system-duration 5  # 完整诊断（spindump 5 秒）
-./hung_detect -m --sample                 # 监控 + 自动诊断
-sudo ./hung_detect -m --full              # 监控 + 完整自动诊断
-sudo ./hung_detect -m --full --spindump-duration 5 --spindump-system-duration 5  # 监控 + 完整自动诊断（spindump 5 秒）
+# 诊断（自动 sample/spindump hung 进程）
+hung_detect --sample                     # 检测 + 采样
+hung_detect -m --sample                  # 监控 + 自动采样
+sudo hung_detect -m --full               # 监控 + 完整自动诊断
+sudo hung_detect --full --spindump-duration 5  # 完整诊断（5 秒采集）
 
 # MCP 服务器（AI 集成）
-hung_detect --mcp-install                # 自动安装到所有检测到的 AI 客户端
-hung_detect --mcp-config                 # 打印配置 JSON 用于手动设置
-hung_detect --mcp                        # 启动 MCP 服务器（由 AI 客户端调用）
+hung_detect --mcp-install                # 一键安装到 14 个 AI 客户端
+hung_detect --mcp                        # 启动 MCP 服务器
 ```
 
 ## 🤖 MCP 服务器（AI 集成）
@@ -143,46 +124,30 @@ MCP 服务器通过 stdio（JSON-RPC 2.0）提供 5 个工具：
 hung_detect --mcp
 ```
 
-## 🖼️ 截图
+## 📊 输出示例
 
-### 表格输出
+<details>
+<summary>JSON 输出</summary>
 
-![hung_detect table output](images/hung_detect.png)
-
-### JSON 输出
-
-```bash
-❯ hung_detect --json
-```
 ```json
 {
   "version": "0.5.2",
-  "build_time": "2026-02-28 00:22:49.853+08:00",
-  "scan_time": "2026-02-28 00:23:00.027+08:00",
   "summary": { "total": 1, "not_responding": 1, "ok": 0 },
-  "processes": [
-    {
-      "pid": 913,
-      "ppid": 1,
-      "user": "john",
-      "name": "AlDente",
-      "bundle_id": "com.apphousekitchen.aldente-pro-setapp",
-      "executable_path": "/Applications/Setapp/AlDente Pro.app/Contents/MacOS/AlDente",
-      "sha256": "28fc0725fd3767f48f2a3f2c33af662de866d8306ade656e7d3fa5c59783dedc",
-      "arch": "arm64",
-      "codesign_authority": "Developer ID Application: Apphousekitchen UG (haftungsbeschrankt) (F2GU6N2K5E)",
-      "sandboxed": false,
-      "preventing_sleep": false,
-      "elapsed_seconds": 29033,
-      "responding": false
-    }
-  ]
+  "processes": [{
+    "pid": 913, "name": "AlDente", "responding": false,
+    "bundle_id": "com.apphousekitchen.aldente-pro-setapp",
+    "arch": "arm64", "codesign_authority": "Developer ID Application: ...",
+    "sandboxed": false, "elapsed_seconds": 29033, "app_type": "Foreground"
+  }]
 }
 ```
+</details>
 
-### 监控架构
+<details>
+<summary>监控架构</summary>
 
 ![Monitor mode architecture](images/monitor-architecture.svg)
+</details>
 
 ## ⚙️ CLI 参数
 
@@ -230,27 +195,21 @@ hung_detect --mcp
 - `1`：至少有一个进程未响应。
 - `2`：参数错误或运行时错误。
 
-## 🔒 私有 API 兼容说明
+## 🔒 私有 API 说明
 
-本工具有意使用私有 API。不同 macOS 版本中，符号可能发生重导出或命名变化。
-当前实现已做回退解析：
+本工具使用 macOS 私有 API：
 
-- `CGSMainConnectionID`、`CGSEventIsAppUnresponsive`
-  - 优先通过 `CFBundleGetFunctionPointerForName` 从 `SkyLight` 框架路径解析
-  - 失败后回退到 `dlsym`（`RTLD_DEFAULT` + 已加载句柄），同时尝试无前缀和 `_` 前缀符号名
-- `LSASNCreateWithPid`、`LSASNExtractHighAndLowParts`
-  - 优先通过 `CFBundleGetFunctionPointerForName` 从 `LaunchServices` 框架路径解析
-    （先尝试 `CoreServices.framework` 子框架路径，再尝试历史 `PrivateFrameworks` 路径）
-  - 失败后回退到 `dlsym`（`RTLD_DEFAULT` + 已加载句柄），同时尝试 `_`、无前缀、`__` 三种符号名
+- **CGS 函数**（`CGSMainConnectionID`、`CGSEventIsAppUnresponsive`、`CGSRegisterNotifyProc`）— 通过 [CGSInternal](https://github.com/nickhutchinson/CGSInternal) 头文件直接调用，编译时链接。
+- **LS 函数**（`_LSASNCreateWithPid`、`_LSASNExtractHighAndLowParts`、`_LSCopyApplicationInformation`）— 运行时通过 `dlsym` 解析，支持下划线变体回退。无公开头文件。
 
-如果必须符号都无法解析，程序会以退出码 `2` 结束。
+如果必须符号无法解析，程序以退出码 `2` 结束。
 
 ## 🔎 hung_detect vs Activity Monitor
 
 | 维度 | 活动监视器 | hung_detect | 状态 |
 |---|---|---|---|
 | hung 判定信号来源 | Window Server 私有信号 | 同样使用 CGS 信号链路（`CGSEventIsAppUnresponsive`） | 对齐 |
-| 误报过滤 | 私有 SkyLight entitlement 保证 API 结果准确 | 窗口交叉验证：非 regular 且无窗口的进程抑制误报 | 对齐（机制不同，结果一致） |
+| hung 检测范围 | 仅 `knownToLaunchServices` | 同——仅检测 LS 注册进程 | 对齐 |
 | 监控机制 | push + poll | push + poll，push 不可用时自动退化为 poll-only | 对齐 |
 | 启动期 push 窗口处理 | 通过内部刷新快速收敛 | unknown PID push 会触发一次即时 rescan | 对齐 |
 | push 回调作用范围 | 前台应用类型 | push 更新仅应用于前台应用类型 | 对齐 |
@@ -265,7 +224,7 @@ hung_detect --mcp
 ## 🧵 并发模型
 
 - `MonitorEngine` 状态统一收敛到主队列（`CFRunLoopRun` + 回调切主线程）管理。
-- 监控事件循环使用 `CFRunLoopRun()`（而非 `dispatchMain()`），确保 `NSWorkspace.shared.runningApplications` 通过 NSRunLoop 通知与新启动/终止的应用保持同步。
+- 监控事件循环使用 `CFRunLoopRun()`（而非 `dispatchMain()`），确保 CGS push 通知和 GCD 定时器事件在主 run loop 中处理。
 - push 回调（`CGSRegisterNotifyProc`）与定时轮询都写入同一份主线程状态，避免竞态。
 - push 事件出现未知/过早 PID 时，会立即安排一次对账重扫，不等下一次轮询。
 - 诊断任务在独立并发队列执行；同一 PID 的去重由小粒度锁保护。

@@ -21,7 +21,7 @@ stdout writes:      serialized via stdoutLock (NSLock)
 
 ### Why this layout
 
-- `NSWorkspace.shared.runningApplications` requires main thread / run loop
+- Process enumeration via `proc_listpids` + LaunchServices probe (no main thread requirement)
 - stdin `readLine()` is blocking, must be on a background thread
 - stdout needs a lock since both request handlers and monitor poll ticks write to it
 

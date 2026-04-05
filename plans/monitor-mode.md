@@ -137,12 +137,12 @@ Registered in `runMonitor()`:
 enableMonitorPushIfAvailable() // requires both kCGSNotificationAppUnresponsive and kCGSNotificationAppResponsive registration success
 ```
 
-Push updates are filtered to foreground-type apps (`activationPolicy == .regular`) to align with Activity Monitor behavior, and foreground classification is refreshed at callback time.
+Push updates are filtered to foreground-type apps (LS ApplicationType == "Foreground") to align with Activity Monitor behavior, and foreground classification is refreshed at callback time via `RuntimeAPI.lsAppInfo(pid:)`.
 
-#### Layer 2: DispatchSourceTimer polling (all processes)
+#### Layer 2: DispatchSourceTimer polling (all LS-registered processes)
 
 **`scanProcesses(opts:)`** — lightweight scan returning `[pid_t: ProcessSnapshot]`:
-- Enumerates `NSWorkspace.shared.runningApplications`
+- Enumerates LS-registered processes via `RuntimeAPI.allLSProcesses(useCache: true)`
 - Applies `--pid`/`--name` filters (reuses existing filter pattern from main)
 - Calls `isAppUnresponsive()` for each
 - Returns dictionary keyed by PID
@@ -191,7 +191,7 @@ Single line after `loadAPIs()`. Existing single-shot path completely unchanged.
 - **Report initial hung** — on startup, immediately report any already-hung processes
 - **Lightweight scan** — monitor only collects PID/name/bundleID/hung status per tick (no sysctl, sha256, sandbox, etc.)
 - **Thread safety** — push callback and timer both run on `.main` queue, no locks needed
-- **`CFRunLoopRun()` run loop** — full NSRunLoop processing so that `NSWorkspace.shared.runningApplications` stays in sync with newly launched/terminated apps (see bug fix in §8 below); exit via signal handler
+- **`CFRunLoopRun()` run loop** — full NSRunLoop processing for CGS push notifications and GCD timer ticks; exit via signal handler
 
 ### 7. Architecture Diagram
 
@@ -217,7 +217,15 @@ Single line after `loadAPIs()`. Existing single-shot path completely unchanged.
                     +----------------------------+
 ```
 
-## Hung Detection False-Positive Mitigation (2026-02-26)
+## Hung Detection False-Positive Mitigation (2026-02-26) — SUPERSEDED
+
+> **Note (2026-04-05):** This section is historical. The false-positive filter (`activationPolicy != .regular && !windowOwnerPIDs`) was removed in v0.5.2.
+> Process enumeration switched from `NSWorkspace.shared.runningApplications` to `proc_listpids` + `_LSCopyApplicationInformation`.
+> Hung detection now applies only to LS-registered processes (same as Activity Monitor's `knownToLaunchServices` check).
+> Non-LS processes are not checked — `CGSEventIsAppUnresponsive` returns meaningless results for processes without a Window Server event loop.
+> See `plans/process-model.md` and `plans/tech-decisions.md` for current architecture.
+
+## ~~Hung Detection False-Positive Mitigation (2026-02-26)~~
 
 ### Problem
 

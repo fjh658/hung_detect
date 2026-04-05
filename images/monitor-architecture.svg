@@ -54,7 +54,7 @@
 
   <!-- Title -->
   <text x="480" y="52" text-anchor="middle" class="titleMain">Monitor Mode Architecture</text>
-  <text x="480" y="74" text-anchor="middle" class="titleSub">Dual-Layer Push + Poll Detection with False-Positive Filtering</text>
+  <text x="480" y="74" text-anchor="middle" class="titleSub">Dual-Layer Push + Poll Detection · LS-Registered Processes Only</text>
 
   <!-- ═══════ Window Server ═══════ -->
   <rect x="310" y="100" width="340" height="70" rx="14" fill="url(#purpleGrad)" stroke="#9a7ad4" stroke-width="1.5"/>
@@ -91,7 +91,7 @@
   <!-- ═══════ Layer 2: Polling ═══════ -->
   <rect x="250" y="370" width="460" height="90" rx="14" fill="url(#nodeGrad)" stroke="#b8cfe8" stroke-width="1.5"/>
   <text x="480" y="402" text-anchor="middle" class="nodeTitle">Layer 2: Timer Polling</text>
-  <text x="480" y="422" text-anchor="middle" class="nodeSub">comprehensive · all PIDs</text>
+  <text x="480" y="422" text-anchor="middle" class="nodeSub">comprehensive · all LS-registered PIDs</text>
   <line x1="290" y1="432" x2="670" y2="432" stroke="#7aaad4" stroke-opacity="0.25"/>
   <!-- Polling badges -->
   <rect x="330" y="438" width="130" height="18" rx="4" fill="#1a3049" stroke="#7aaad4" stroke-opacity="0.45"/>
@@ -99,25 +99,19 @@
   <rect x="480" y="438" width="178" height="18" rx="4" fill="#1a3049" stroke="#7aaad4" stroke-opacity="0.45"/>
   <text x="569" y="450" text-anchor="middle" class="nodeSub">CGSEventIsAppUnresponsive</text>
 
-  <!-- Arrow: Layer 2 -> FP Filter -->
+  <!-- Arrow: Layer 2 -> Output -->
   <path d="M480 460 L480 518" stroke="#7aaad4" stroke-width="1.6" stroke-dasharray="6,4" marker-end="url(#arrBlue)"/>
   <text x="492" y="485" class="arrLabelBlue">diff against monitorState</text>
   <text x="492" y="501" class="arrLabelBlue">emits MonitorEvent (deduped)</text>
 
-  <!-- ═══════ False-Positive Filter ═══════ -->
-  <rect x="250" y="520" width="460" height="70" rx="14" fill="url(#warnGrad)" stroke="#c8881a" stroke-opacity="0.65" stroke-width="1.5"/>
-  <text x="480" y="550" text-anchor="middle" class="nodeTitle" fill="#e8c08a">False-Positive Filter</text>
-  <text x="480" y="570" text-anchor="middle" class="badgeTxt">non-regular + no windows → suppress</text>
+  <!-- LS-only annotation (right) -->
+  <rect x="740" y="390" width="180" height="46" rx="8" fill="#11253b" stroke="#7aaad4" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="830" y="409" text-anchor="middle" class="annotation">knownToLaunchServices only</text>
+  <text x="830" y="424" text-anchor="middle" class="annotation">non-LS PIDs: no event loop</text>
+  <path d="M740 416 L712 416" stroke="#7aaad4" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrBlue)"/>
 
-  <!-- Filter annotation (right) -->
-  <rect x="740" y="524" width="180" height="62" rx="8" fill="#11253b" stroke="#c8881a" stroke-opacity="0.35" stroke-width="1" stroke-dasharray="4,3"/>
-  <text x="830" y="543" text-anchor="middle" class="annotation">activationPolicy != .regular</text>
-  <text x="830" y="558" text-anchor="middle" class="annotation">&amp;&amp; !processHasWindows(pid)</text>
-  <text x="830" y="573" text-anchor="middle" class="annotation">→ hung = false</text>
-  <path d="M740 555 L712 555" stroke="#c8881a" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#arrGold)"/>
-
-  <!-- Arrow: FP Filter -> Output -->
-  <path d="M480 590 L480 628" stroke="#e8a020" stroke-width="1.6" marker-end="url(#arrGold)"/>
+  <!-- Arrow: diff -> Output -->
+  <path d="M480 518 L480 628" stroke="#e8a020" stroke-width="1.6" marker-end="url(#arrGold)"/>
 
   <!-- ═══════ Output ═══════ -->
   <rect x="310" y="630" width="340" height="56" rx="14" fill="url(#greenGrad)" stroke="#4ade80" stroke-opacity="0.6" stroke-width="1.5"/>
@@ -131,5 +125,5 @@
   <line x1="420" y1="702" x2="452" y2="702" stroke="#7aaad4" stroke-width="2" stroke-dasharray="6,4"/>
   <text x="460" y="706" class="legend">state updates / feedback</text>
 
-  <text x="680" y="706" class="legend" fill="#c8881a">⊙ false-positive mitigation point</text>
+  <text x="680" y="706" class="legend" fill="#7aaad4">LS = LaunchServices registered</text>
 </svg>
